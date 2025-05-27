@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = [
+    "trade_protocal_lite",
+    "core_entities",
+    "tick_generator",
+    "matching_engine",
+    "market_rules",
+    "account_management",
+    "persistence_services",
+    "server_core"
+, "order_engine"]
+
+[workspace.dependencies]
+# Common dependencies can be listed here if needed later
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

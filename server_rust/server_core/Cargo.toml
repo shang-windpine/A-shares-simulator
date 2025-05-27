@@ -1,0 +1,20 @@
+[package]
+name = "server_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.45.1", features = ["full"] }
+bytes = "1.10.1"
+prost = "0.13.5"
+thiserror = "2.0.12"
+anyhow = "1.0.98" # 可选，用于简化错误处理
+trade_protocal_lite = { path = "../trade_protocal_lite" }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+chrono = "0.4"
+async-trait = "0.1.88"
+
+# 根据 MVP_开发计划_BDD.md, 消息头可能包含消息类型 (uint16)
+# 可能需要一个 crate 来帮助处理字节序 (如网络字节序 BigEndian)
+# byteorder = "1" # 如果直接操作字节，而非依赖bytes库的get_u16等方法 

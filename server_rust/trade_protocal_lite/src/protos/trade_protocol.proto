@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package trade_protocal_lite;
+
+// ------------------ General Enums ------------------
+enum OrderType {
+    ORDER_TYPE_UNSPECIFIED = 0;
+    LIMIT = 1;
+    // MARKET = 2; // MVP 明确排除复杂市价单
+}
+
+enum OrderSide {
+    ORDER_SIDE_UNSPECIFIED = 0;
+    BUY = 1;
+    SELL = 2;
+}
+
+enum OrderStatus {
+    ORDER_STATUS_UNSPECIFIED = 0;
+    PENDING_NEW = 1;       // 待报 (已提交到服务器，等待进入订单簿)
+    NEW = 2;               // 已报 (已进入订单簿，等待撮合)
+    PARTIALLY_FILLED = 3;  // 部分成交
+    FILLED = 4;            // 完全成交
+    CANCELED = 5;          // 已撤销
+    REJECTED = 6;          // 已拒绝 (例如 T+1 限制，资金不足等)
+}
+
+enum RejectionReason {
+    REASON_UNSPECIFIED = 0;
+    INSUFFICIENT_FUNDS = 1;
+    INSUFFICIENT_POSITION = 2;
+    T_PLUS_1_RESTRICTION = 3;
+    INVALID_ORDER_PRICE = 4;
+    INVALID_ORDER_QUANTITY = 5;
+    MARKET_CLOSED = 6;
+    STOCK_NOT_TRADABLE = 7;
+    DUPLICATE_CLIENT_ORDER_ID = 8;
+    ORDER_NOT_FOUND = 9;
+    OTHER = 99;
+}
+
+// ------------------ Request/Response Messages ------------------
+
+// Login
+message LoginRequest {
+    string user_id = 1; // MVP阶段为单一默认虚拟账户，此字段可预留
+    string password = 2; // 密码，MVP阶段可忽略
+}
+
+message LoginResponse {
+    bool success = 1;
+    string message = 2;        // 例如 "Login successful" 或错误信息
+    string session_id = 3;     // 会话ID，MVP阶段可选
+    // 可选：登录成功后直接返回初始账户信息
+    AccountInfoResponse initial_account_info = 4;
+}
+
+// New Order
+message NewOrderRequest {
+    string account_id = 1;        // 账户ID
+    string client_order_id = 2;   // 客户端生成的订单ID，用于跟踪
+    string stock_code = 3;        // 股票代码
+    OrderSide side = 4;           // 买卖方向
+    OrderType type = 5;           // 订单类型 (MVP为限价单)
+    int64 quantity = 6;           // 数量 (股)
+    double price = 7;             // 价格 (限价单的价格)
+    // string timestamp_utc = 8;  // 客户端时间戳 (UTC), 服务器应以接收时间为准
+}
+
+// Order Update (用于订单确认、成交回报、撤单确认、拒绝等)
+message OrderUpdateResponse {
+    string account_id = 1;
+    string server_order_id = 2;   // 服务器生成的唯一订单ID
+    string client_order_id = 3;   // 回显客户端订单ID
+    string stock_code = 4;
+    OrderSide side = 5;
+    OrderType type = 6;
+    OrderStatus status = 7;       // 当前订单状态
+    
+    int64 filled_quantity_this_event = 8;   // 本次事件相关的成交数量 (例如，部分成交时，本次成交了多少)
+    double avg_filled_price_this_event = 9; // 本次事件相关的成交均价
+    
+    int64 cumulative_filled_quantity = 10; // 累计成交数量
+    double avg_cumulative_filled_price = 11; // 累计成交均价 (如果适用)
+    
+    int64 leaves_quantity = 12;           // 剩余未成交数量
+    
+    string server_timestamp_utc = 13;     // 服务器处理此更新的时间戳 (UTC)
+    
+    RejectionReason rejection_reason = 14; // 如果 status 是 REJECTED
+    string reject_message = 15;            // 拒绝的详细文本信息
+    
+    double commission = 16;             // 本次成交产生的手续费 (如果适用)
+    // double realized_pnl_this_event = 17; // 本次成交产生的盈亏 (卖出时适用)
+}
+
+// Cancel Order
+message CancelOrderRequest {
+    string account_id = 1;
+    string server_order_id_to_cancel = 2; // 要取消的服务器订单ID
+    // string client_order_id_to_cancel = 3; // 或者用客户端ID定位，但服务器ID更唯一
+}
+
+// Market Data Subscription
+message MarketDataRequest {
+    enum SubscriptionAction {
+        ACTION_UNSPECIFIED = 0;
+        SUBSCRIBE = 1;
+        UNSUBSCRIBE = 2;
+    }
+    SubscriptionAction action = 1;
+    repeated string stock_codes = 2; // 需要订阅/取消订阅的股票代码列表
+}
+
+// Market Data Snapshot (行情快照推送)
+message MarketDataSnapshot {
+    string stock_code = 1;
+    double last_price = 2;        // 最新价
+    double bid_price_1 = 3;       // 买一价
+    int64 bid_volume_1 = 4;       // 买一量
+    double ask_price_1 = 5;       // 卖一价
+    int64 ask_volume_1 = 6;       // 卖一量
+    // MVP中提到"买卖盘深度等"，如果需要五档，可以扩展 bid_price_2-5, ask_price_2-5 等
+    string server_timestamp_utc = 7; // 行情时间戳 (UTC)
+    
+    // 可选的日内统计数据 (根据MVP沙盒行情生成器决定是否提供)
+    double open_price = 8;        // 今日开盘价
+    double high_price = 9;        // 今日最高价
+    double low_price = 10;         // 今日最低价
+    double prev_close_price = 11;  // 昨日收盘价 (用于计算涨跌幅)
+    int64 total_volume = 12;      // 总成交量 (当日累计)
+    double total_turnover = 13;   // 总成交额 (当日累计)
+}
+
+// Account Information
+message AccountQueryRequest {
+    string account_id = 1; // 要查询的账户ID
+}
+
+message Holding {
+    string stock_code = 1;         // 股票代码
+    string stock_name = 2;         // 股票名称 (方便显示)
+    int64 quantity = 3;            //持有数量
+    double cost_price_avg = 4;     // 平均持仓成本
+    double last_price = 5;         // 当前市价 (来自 MarketDataSnapshot)
+    double market_value = 6;       // 持仓市值 (quantity * last_price)
+    double unrealized_pnl = 7;     // 浮动盈亏
+    double unrealized_pnl_ratio = 8; // 浮动盈亏比例
+    int64 available_sell_quantity = 9; // 可卖数量 (考虑T+1)
+}
+
+message AccountInfoResponse {
+    string account_id = 1;
+    double total_assets = 2;          // 总资产 (持仓市值 + 可用资金 + 冻结资金)
+    double available_funds = 3;       // 可用资金
+    double frozen_funds = 4;          // 冻结资金 (例如挂单未成交占用的资金)
+    double total_market_value = 5;    // 总持仓市值
+    repeated Holding holdings = 6;    // 持仓列表
+    string server_timestamp_utc = 7;  // 数据生成时间戳
+    string message = 8;               // 可选的附加信息
+}
+
+// Heartbeat
+message Heartbeat {
+    string client_timestamp_utc = 1; // 客户端发送心跳的时间
+}
+
+message HeartbeatResponse {
+    string server_timestamp_utc = 1; // 服务器响应心跳的时间
+}
+
+// Generic Error Response (可用于不适合特定响应消息的错误场景)
+message ErrorResponse {
+    int32 error_code = 1;       // 内部错误码
+    string error_message = 2;   // 错误描述
+    string original_request_id = 3; // 可选，关联到哪个请求出错
+} 

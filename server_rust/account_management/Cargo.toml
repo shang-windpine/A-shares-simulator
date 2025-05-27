@@ -1,0 +1,8 @@
+[package]
+name = "account_management"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core_entities = { path = "../core_entities" }
+# Dependencies like rust_decimal for precise calculations might be added 

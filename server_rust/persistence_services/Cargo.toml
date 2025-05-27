@@ -1,0 +1,8 @@
+[package]
+name = "persistence_services"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core_entities = { path = "../core_entities" }
+# Dependencies like sqlx (for MySQL), influxdb (for InfluxDB), redis-rs (for Redis) will be added here 
