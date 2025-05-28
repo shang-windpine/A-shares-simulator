@@ -7,7 +7,6 @@ edition = "2024"
 anyhow = "1.0.98"
 async-trait = "0.1.83"
 chrono = { version = "0.4", features = ["serde"] }
-core_entities = { path = "../core_entities" }
 redis = { version = "0.31.0", features = ["tokio-comp"] }
 rust_decimal = "1.37.1"
 rust_decimal_macros = "1.37.1"
@@ -17,4 +16,5 @@ tokio = { version = "1.45.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 uuid = { version = "1.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+order_engine = { path = "../order_engine" }
 # Dependencies like redis might be added here 
