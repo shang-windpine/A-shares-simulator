@@ -1,9 +1,19 @@
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::Arc;
 
 /// 时间戳类型
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
+
+// 导出模块
+pub mod order_pool;
+pub mod engine;
+
+// 重新导出核心类型
+pub use order_pool::{OrderPool, OrderPoolStats};
+pub use engine::{OrderEngine, OrderEngineConfig, OrderEngineFactory};
+pub use core_entities::MatchNotification;
+
 /// 订单方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrderSide {
@@ -71,11 +81,11 @@ impl Display for OrderStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Order {
     /// 订单ID
-    pub id: String,
+    pub order_id: Arc<str>,
     /// 股票代码
-    pub stock_id: String,
+    pub stock_id: Arc<str>,
     /// 用户ID
-    pub user_id: String,
+    pub user_id: Arc<str>,
     /// 订单方向
     pub side: OrderSide,
     /// 订单类型
@@ -95,7 +105,7 @@ pub struct Order {
 impl Order {
     /// 创建新的限价订单
     pub fn new_limit_order(
-        id: String,
+        order_id: String,
         stock_id: String,
         user_id: String,
         side: OrderSide,
@@ -104,9 +114,9 @@ impl Order {
         timestamp: Timestamp,
     ) -> Self {
         Self {
-            id,
-            stock_id,
-            user_id,
+            order_id: order_id.into(),
+            stock_id: stock_id.into(),
+            user_id: user_id.into(),
             side,
             order_type: OrderType::Limit,
             price,
@@ -131,6 +141,28 @@ impl Order {
     pub fn filled_quantity(&self) -> u64 {
         self.quantity - self.unfilled_quantity
     }
+}
+
+#[derive(Debug)]
+pub enum OrderNotification {
+    NewOrder(Order),
+    CancelOrder { order_id: Arc<str>, stock_id: Arc<str> },
+}
+
+/// 
+/// 用于在订单进入撮合前进行验证
+pub trait OrderValidator: Send + Sync {
+    /// 验证订单是否有效
+    fn validate_order(&self, order: &Order) -> Result<(), String>;
+
+    /// 验证价格是否有效
+    fn validate_price(&self, price: Decimal) -> Result<(), String>;
+
+    /// 验证数量是否有效
+    fn validate_quantity(&self, quantity: u64) -> Result<(), String>;
+
+    /// 验证股票代码是否有效
+    fn validate_stock_id(&self, stock_id: &Arc<str>) -> Result<(), String>;
 }
 
 #[cfg(test)]
@@ -159,23 +191,6 @@ mod tests {
         assert!(!order.is_partially_filled());
         assert_eq!(order.filled_quantity(), 0);
     }
-
-    /// 订单验证器接口
-/// 
-/// 用于在订单进入撮合前进行验证
-pub trait OrderValidator: Send + Sync {
-    /// 验证订单是否有效
-    fn validate_order(&self, order: &Order) -> Result<(), String>;
-
-    /// 验证价格是否有效
-    fn validate_price(&self, price: Decimal) -> Result<(), String>;
-
-    /// 验证数量是否有效
-    fn validate_quantity(&self, quantity: u64) -> Result<(), String>;
-
-    /// 验证股票代码是否有效
-    fn validate_stock_id(&self, stock_id: &String) -> Result<(), String>;
-}
 
     #[test]
     fn test_order_status_methods() {
