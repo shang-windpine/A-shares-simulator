@@ -1,6 +1,6 @@
 // Placeholder for MarketRuleEngine logic (e.g., T+1, fees)
 
-use core_entities; // Example of using another workspace crate
+ // Example of using another workspace crate
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

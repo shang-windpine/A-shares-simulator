@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn, instrument};
+use order_engine::OrderEngine;
 
 use crate::connection_manager::{ConnectionManager, ConnectionManagement, ConnectionStats};
 use crate::error::{ConnectionError};
@@ -42,6 +43,8 @@ pub struct Server {
     shutdown_rx: broadcast::Receiver<()>,
     /// 服务器配置
     config: ServerConfig,
+    /// 订单引擎引用（可选，用于依赖注入）
+    order_engine: Option<Arc<OrderEngine>>,
 }
 
 impl Server {
@@ -79,7 +82,18 @@ impl Server {
             shutdown_tx,
             shutdown_rx,
             config,
+            order_engine: None,
         })
+    }
+
+    /// 创建带有业务服务依赖的服务器实例
+    pub async fn new_with_services(
+        config: ServerConfig,
+        order_engine: Arc<OrderEngine>,
+    ) -> Result<Self, ConnectionError> {
+        let mut server = Self::new(config).await?;
+        server.order_engine = Some(order_engine);
+        Ok(server)
     }
 
     /// 使用默认配置创建服务器
@@ -148,7 +162,12 @@ impl Server {
         // 使用连接管理器创建并管理新连接
         {
             let mut manager = self.connection_manager.lock().await;
-            let connection_id = manager.create_and_manage_connection(stream, addr, shutdown_rx).await?;
+            let connection_id = manager.create_and_manage_connection_with_services(
+                stream, 
+                addr, 
+                shutdown_rx,
+                self.order_engine.clone()
+            ).await?;
             info!("新连接已创建: ID={}, 地址={}", connection_id, addr);
         }
 

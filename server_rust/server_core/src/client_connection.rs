@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
+use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn, instrument};
 use trade_protocal_lite::{TradeMessage, WireMessage};
+use order_engine::OrderEngine;
 
 use crate::error::{ConnectionError};
 use crate::frame_decoder::FrameDecoder;
@@ -16,7 +18,6 @@ const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 const HEARTBEAT_CHECK_INTERVAL_SECS: u64 = 10;
 
 /// 客户端连接处理器，管理单个客户端连接的完整生命周期
-#[derive(Debug)]
 pub struct ClientConnection {
     /// 连接唯一标识
     id: ConnectionId,
@@ -46,7 +47,7 @@ impl ClientConnection {
 
         let (reader, writer) = tokio::io::split(stream);
         let frame_decoder = FrameDecoder::new(reader, None);
-        let message_dispatcher = MessageDispatcher::new(id);
+        let message_dispatcher = MessageDispatcher::new_without_services(id);
 
         Ok(Self {
             id,
@@ -71,7 +72,37 @@ impl ClientConnection {
 
         let (reader, writer) = tokio::io::split(stream);
         let frame_decoder = FrameDecoder::new(reader, None);
-        let message_dispatcher = MessageDispatcher::new(id);
+        let message_dispatcher = MessageDispatcher::new_without_services(id);
+
+        Ok(Self {
+            id,
+            frame_decoder,
+            writer,
+            message_dispatcher,
+            shutdown_rx,
+            control_rx: Some(control_rx),
+            last_heartbeat: Instant::now(),
+        })
+    }
+
+    /// 创建新的客户端连接（带控制通道和业务服务依赖）
+    #[instrument(level = "debug", skip(stream, shutdown_rx, control_rx, order_engine))]
+    pub async fn new_with_control_and_services(
+        stream: TcpStream, 
+        id: ConnectionId, 
+        shutdown_rx: broadcast::Receiver<()>,
+        control_rx: mpsc::Receiver<ConnectionControlCommand>,
+        order_engine: Option<Arc<OrderEngine>>,
+    ) -> Result<Self, ConnectionError> {
+        info!("创建客户端连接（带控制通道和服务）: ID={}", id);
+
+        let (reader, writer) = tokio::io::split(stream);
+        let frame_decoder = FrameDecoder::new(reader, None);
+        
+        let message_dispatcher = match order_engine {
+            Some(engine) => MessageDispatcher::new(id, engine),
+            None => MessageDispatcher::new_without_services(id),
+        };
 
         Ok(Self {
             id,

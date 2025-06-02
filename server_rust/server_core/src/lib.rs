@@ -4,6 +4,7 @@ pub mod connection_manager;
 pub mod message_dispatcher;
 pub mod client_connection;
 pub mod server;
+pub mod app;
 
 // Re-export key components
 pub use error::{ConnectionError};
@@ -13,6 +14,7 @@ pub use message_dispatcher::MessageDispatcher;
 pub use client_connection::{ClientConnection, ConnectionInfo};
 pub use server::{Server, ServerConfig, ServerStats};
 pub use connection_manager::ConnectionId;
+pub use app::{App, AppConfig, AppServices};
 
 // Initialize tracing subscriber for the library
 pub fn init_tracing() {

@@ -6,6 +6,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+use order_engine::OrderEngine;
 
 use crate::error::{ConnectionError};
 use crate::client_connection::ClientConnection;
@@ -39,13 +40,22 @@ pub enum ConnectionStatusReport {
 
 /// 连接管理器的抽象trait，定义了连接管理器应该具备的核心功能
 #[async_trait::async_trait]
-pub trait ConnectionManagement: {
+pub trait ConnectionManagement: Send + Sync {
     /// 创建并管理新的客户端连接
     async fn create_and_manage_connection(
         &mut self,
         stream: TcpStream,
         addr: SocketAddr,
         shutdown_rx: broadcast::Receiver<()>,
+    ) -> Result<ConnectionId, ConnectionError>;
+
+    /// 创建并管理新的客户端连接（带有业务服务依赖）
+    async fn create_and_manage_connection_with_services(
+        &mut self,
+        stream: TcpStream,
+        addr: SocketAddr,
+        shutdown_rx: broadcast::Receiver<()>,
+        order_engine: Option<Arc<OrderEngine>>,
     ) -> Result<ConnectionId, ConnectionError>;
 
     /// 移除指定的连接
@@ -151,6 +161,74 @@ impl ConnectionManagement for ConnectionManager {
         // 在独立任务中运行客户端连接处理
         let task_handle = tokio::spawn(async move {
             match ClientConnection::new_with_control(stream, connection_id, shutdown_rx, control_rx).await {
+                Ok(connection) => {
+                    info!("客户端连接 {} ({}) 开始处理", connection_id, addr);
+                    
+                    // 运行连接处理循环
+                    match connection.run().await {
+                        Ok(_) => {
+                            info!("客户端连接 {} ({}) 正常结束", connection_id, addr);
+                        }
+                        Err(ConnectionError::ShutdownRequested) => {
+                            info!("客户端连接 {} ({}) 因关闭信号结束", connection_id, addr);
+                        }
+                        Err(ConnectionError::HeartbeatTimeout { .. }) => {
+                            warn!("客户端连接 {} ({}) 因心跳超时结束", connection_id, addr);
+                        }
+                        Err(e) => {
+                            error!("客户端连接 {} ({}) 出错结束: {}", connection_id, addr, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("创建客户端连接失败 ({}, ID={}): {}", addr, connection_id, e);
+                }
+            }
+        });
+
+        // 创建连接处理器
+        let connection_handle = ConnectionHandle {
+            task_handle,
+            control_tx,
+            addr,
+        };
+
+        // 存储连接处理器
+        self.connections.insert(connection_id, connection_handle);
+        let new_count = self.active_count.fetch_add(1, Ordering::Relaxed) + 1;
+        
+        info!("新连接已创建并管理: ID={}, 地址={}, 当前连接数: {}/{}", 
+             connection_id, addr, new_count, self.max_connections);
+
+        Ok(connection_id)
+    }
+
+    /// 创建并管理新的客户端连接（带有业务服务依赖）
+    async fn create_and_manage_connection_with_services(
+        &mut self,
+        stream: TcpStream,
+        addr: SocketAddr,
+        shutdown_rx: broadcast::Receiver<()>,
+        order_engine: Option<Arc<OrderEngine>>,
+    ) -> Result<ConnectionId, ConnectionError> {
+        let current_count = self.active_count.load(Ordering::Relaxed);
+        
+        if current_count >= self.max_connections {
+            warn!("拒绝新连接 {}：已达到最大连接数限制 {}/{}", addr, current_count, self.max_connections);
+            return Err(ConnectionError::MaxConnectionsReached {
+                limit: self.max_connections,
+            });
+        }
+
+        // 分配连接ID
+        let connection_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        
+        // 创建控制通道
+        let (control_tx, control_rx) = mpsc::channel::<ConnectionControlCommand>(100);
+        
+        // 在独立任务中运行客户端连接处理
+        let task_handle = tokio::spawn(async move {
+            match ClientConnection::new_with_control_and_services(stream, connection_id, shutdown_rx, control_rx, order_engine).await {
                 Ok(connection) => {
                     info!("客户端连接 {} ({}) 开始处理", connection_id, addr);
                     

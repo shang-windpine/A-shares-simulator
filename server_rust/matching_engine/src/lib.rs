@@ -6,7 +6,11 @@ pub mod engine;
 pub mod errors;
 
 // 重新导出共享类型
-pub use core_entities::{MatchNotification, Trade, TradeExecution, OrderStatusInTrade, Timestamp};
+pub use core_entities::{
+    MatchNotification, Trade, TradeExecution, OrderStatusInTrade, Timestamp,
+    Order, OrderSide, OrderStatus, OrderType, OrderNotification, 
+    OrderValidator, StockSpecificNotification
+};
 
 // Initialize tracing subscriber for the library
 pub fn init_tracing() {

@@ -1,6 +1,5 @@
 use order_engine::{
-    Order, OrderSide, OrderEngine, OrderEngineConfig, OrderEngineFactory,
-    MatchNotification, OrderNotification, OrderStatus
+    Order, OrderSide, OrderEngineConfig, OrderEngineFactory, OrderNotification, OrderStatus
 };
 use rust_decimal_macros::dec;
 use tokio::time::{sleep, Duration};
@@ -17,7 +16,7 @@ async fn test_order_engine_integration() {
     };
 
     // 创建订单引擎和通信通道
-    let (mut engine, mut order_rx, match_tx) = 
+    let (mut engine, order_rx, match_tx) = 
         OrderEngineFactory::create_with_channels(None, config);
 
     // 启动订单引擎在后台

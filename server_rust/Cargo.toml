@@ -7,9 +7,10 @@ members = [
     "matching_engine",
     "market_rules",
     "account_management",
-    "persistence_services",
-    "server_core"
-, "order_engine"]
+    "server_core",
+    "order_engine",
+    "market_data"
+]
 
 [workspace.dependencies]
 # Common dependencies can be listed here if needed later

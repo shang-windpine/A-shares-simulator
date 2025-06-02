@@ -1,5 +1,5 @@
 use order_engine::{
-    Order, OrderSide, OrderEngine, OrderEngineConfig, OrderEngineFactory, 
+    Order, OrderSide, OrderEngineConfig, OrderEngineFactory, 
     MatchNotification, OrderNotification
 };
 use rust_decimal_macros::dec;
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 创建订单引擎和通信channels
-    let (mut engine, mut order_rx, match_tx) = 
+    let (engine, mut order_rx, match_tx) = 
         OrderEngineFactory::create_with_channels(None, config);
 
     // 启动订单引擎

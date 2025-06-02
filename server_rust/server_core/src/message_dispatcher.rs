@@ -1,21 +1,40 @@
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 use trade_protocal_lite::{TradeMessage, ProtoBody, protocol::*};
+use order_engine::{OrderEngine, Order, OrderSide as EngineOrderSide, OrderEngineFactory, OrderEngineConfig};
+use rust_decimal::Decimal;
 
 use crate::error::{ConnectionError};
 use crate::connection_manager::ConnectionId;
 
 /// 消息分发器，负责根据消息类型将请求路由到相应的业务处理器
-#[derive(Debug)]
 pub struct MessageDispatcher {
     /// 关联的连接ID
     connection_id: ConnectionId,
+    /// 订单引擎引用
+    order_engine: Arc<OrderEngine>,
 }
 
 impl MessageDispatcher {
-    /// 创建新的消息分发器
-    pub fn new(connection_id: ConnectionId) -> Self {
-        debug!("为连接 {} 创建消息分发器", connection_id);
-        Self { connection_id }
+    /// 创建新的消息分发器（带有订单引擎依赖）
+    pub fn new(connection_id: ConnectionId, order_engine: Arc<OrderEngine>) -> Self {
+        debug!("为连接 {} 创建消息分发器（带订单引擎）", connection_id);
+        Self { 
+            connection_id,
+            order_engine,
+        }
+    }
+
+    /// 创建新的消息分发器（无业务服务依赖，用于向后兼容）
+    pub fn new_without_services(connection_id: ConnectionId) -> Self {
+        debug!("为连接 {} 创建消息分发器（无业务服务）", connection_id);
+        // 创建一个默认的 OrderEngine 实例用于向后兼容
+        let (order_engine, _order_rx, _match_tx) = 
+            OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
+        Self { 
+            connection_id,
+            order_engine: Arc::new(order_engine),
+        }
     }
 
     /// 分发消息到相应的业务处理器
@@ -120,56 +139,182 @@ impl MessageDispatcher {
         info!("连接 {} 处理新订单请求: symbol={}, side={:?}, quantity={}", 
               self.connection_id, req.stock_code, req.side, req.quantity);
         
-        // TODO: 实现实际的交易逻辑
-        // 这里先返回一个模拟的订单确认
-        let response = OrderUpdateResponse {
-            account_id: req.account_id,
-            server_order_id: format!("order_{}_{}", self.connection_id, chrono::Utc::now().timestamp_millis()),
-            client_order_id: req.client_order_id,
-            stock_code: req.stock_code,
-            side: req.side,
-            r#type: req.r#type,
-            status: trade_protocal_lite::OrderStatus::New as i32,
-            filled_quantity_this_event: 0,
-            avg_filled_price_this_event: 0.0,
-            cumulative_filled_quantity: 0,
-            avg_cumulative_filled_price: 0.0,
-            leaves_quantity: req.quantity,
-            server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
-            rejection_reason: trade_protocal_lite::RejectionReason::ReasonUnspecified as i32,
-            reject_message: "".to_string(),
-            commission: 0.0,
+        // 转换协议类型到业务类型
+        let engine_side = match req.side {
+            x if x == trade_protocal_lite::OrderSide::Buy as i32 => EngineOrderSide::Buy,
+            x if x == trade_protocal_lite::OrderSide::Sell as i32 => EngineOrderSide::Sell,
+            _ => {
+                let error_response = ErrorResponse {
+                    error_code: 400,
+                    error_message: "无效的订单方向".to_string(),
+                    original_request_id: req.client_order_id.clone(),
+                };
+                return Ok(ProtoBody::ErrorResponse(error_response));
+            }
         };
 
-        Ok(ProtoBody::OrderUpdateResponse(response))
+        // MVP阶段只支持限价单
+        if req.r#type != trade_protocal_lite::OrderType::Limit as i32 {
+            let error_response = ErrorResponse {
+                error_code: 400,
+                error_message: "当前只支持限价单".to_string(),
+                original_request_id: req.client_order_id.clone(),
+            };
+            return Ok(ProtoBody::ErrorResponse(error_response));
+        }
+
+        // 创建限价订单
+        let price = Decimal::from_f64_retain(req.price).unwrap_or_else(|| Decimal::ZERO);
+        let order = Order::new_limit_order(
+            req.client_order_id.clone(),
+            req.stock_code.clone(),
+            req.account_id.clone(),
+            engine_side,
+            price,
+            req.quantity as u64,
+            chrono::Utc::now(),
+        );
+
+        // 提交订单到引擎
+        match self.order_engine.submit_order(order).await {
+            Ok(server_order_id) => {
+                info!("订单提交成功: client_id={}, server_id={}", req.client_order_id, server_order_id);
+                
+                let response = OrderUpdateResponse {
+                    account_id: req.account_id,
+                    server_order_id,
+                    client_order_id: req.client_order_id,
+                    stock_code: req.stock_code,
+                    side: req.side,
+                    r#type: req.r#type,
+                    status: trade_protocal_lite::OrderStatus::New as i32,
+                    filled_quantity_this_event: 0,
+                    avg_filled_price_this_event: 0.0,
+                    cumulative_filled_quantity: 0,
+                    avg_cumulative_filled_price: 0.0,
+                    leaves_quantity: req.quantity,
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    rejection_reason: trade_protocal_lite::RejectionReason::ReasonUnspecified as i32,
+                    reject_message: "".to_string(),
+                    commission: 0.0,
+                };
+
+                Ok(ProtoBody::OrderUpdateResponse(response))
+            }
+            Err(e) => {
+                warn!("订单提交失败: client_id={}, error={}", req.client_order_id, e);
+                
+                let response = OrderUpdateResponse {
+                    account_id: req.account_id,
+                    server_order_id: "".to_string(),
+                    client_order_id: req.client_order_id,
+                    stock_code: req.stock_code,
+                    side: req.side,
+                    r#type: req.r#type,
+                    status: trade_protocal_lite::OrderStatus::Rejected as i32,
+                    filled_quantity_this_event: 0,
+                    avg_filled_price_this_event: 0.0,
+                    cumulative_filled_quantity: 0,
+                    avg_cumulative_filled_price: 0.0,
+                    leaves_quantity: 0,
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    rejection_reason: trade_protocal_lite::RejectionReason::Other as i32,
+                    reject_message: e,
+                    commission: 0.0,
+                };
+
+                Ok(ProtoBody::OrderUpdateResponse(response))
+            }
+        }
     }
 
     /// 处理撤单请求
     async fn handle_cancel_order_request(&self, req: CancelOrderRequest) -> Result<ProtoBody, ConnectionError> {
         info!("连接 {} 处理撤单请求: order_id={}", self.connection_id, req.server_order_id_to_cancel);
         
-        // TODO: 实现实际的撤单逻辑
-        // 这里先返回一个模拟的撤单确认
-        let response = OrderUpdateResponse {
-            account_id: req.account_id,
-            server_order_id: req.server_order_id_to_cancel,
-            client_order_id: "".to_string(), // 需要从数据库查询
-            stock_code: "UNKNOWN".to_string(), // 需要从数据库查询
-            side: trade_protocal_lite::OrderSide::Unspecified as i32,
-            r#type: trade_protocal_lite::OrderType::Unspecified as i32,
-            status: trade_protocal_lite::OrderStatus::Canceled as i32,
-            filled_quantity_this_event: 0,
-            avg_filled_price_this_event: 0.0,
-            cumulative_filled_quantity: 0,
-            avg_cumulative_filled_price: 0.0,
-            leaves_quantity: 0,
-            server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
-            rejection_reason: trade_protocal_lite::RejectionReason::ReasonUnspecified as i32,
-            reject_message: "订单已撤销".to_string(),
-            commission: 0.0,
+        // 首先查询订单是否存在
+        let order = match self.order_engine.get_order(&req.server_order_id_to_cancel) {
+            Some(order) => order,
+            None => {
+                let response = OrderUpdateResponse {
+                    account_id: req.account_id,
+                    server_order_id: req.server_order_id_to_cancel,
+                    client_order_id: "".to_string(),
+                    stock_code: "UNKNOWN".to_string(),
+                    side: trade_protocal_lite::OrderSide::Unspecified as i32,
+                    r#type: trade_protocal_lite::OrderType::Unspecified as i32,
+                    status: trade_protocal_lite::OrderStatus::Rejected as i32,
+                    filled_quantity_this_event: 0,
+                    avg_filled_price_this_event: 0.0,
+                    cumulative_filled_quantity: 0,
+                    avg_cumulative_filled_price: 0.0,
+                    leaves_quantity: 0,
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    rejection_reason: trade_protocal_lite::RejectionReason::OrderNotFound as i32,
+                    reject_message: "订单不存在".to_string(),
+                    commission: 0.0,
+                };
+                return Ok(ProtoBody::OrderUpdateResponse(response));
+            }
         };
 
-        Ok(ProtoBody::OrderUpdateResponse(response))
+        // 提交撤单请求到引擎
+        match self.order_engine.cancel_order(&req.server_order_id_to_cancel, &order.stock_id).await {
+            Ok(()) => {
+                info!("撤单请求提交成功: order_id={}", req.server_order_id_to_cancel);
+                
+                let response = OrderUpdateResponse {
+                    account_id: req.account_id,
+                    server_order_id: req.server_order_id_to_cancel,
+                    client_order_id: order.order_id.to_string(),
+                    stock_code: order.stock_id.to_string(),
+                    side: match order.side {
+                        EngineOrderSide::Buy => trade_protocal_lite::OrderSide::Buy as i32,
+                        EngineOrderSide::Sell => trade_protocal_lite::OrderSide::Sell as i32,
+                    },
+                    r#type: trade_protocal_lite::OrderType::Limit as i32, // MVP阶段只有限价单
+                    status: trade_protocal_lite::OrderStatus::Canceled as i32,
+                    filled_quantity_this_event: 0,
+                    avg_filled_price_this_event: 0.0,
+                    cumulative_filled_quantity: order.filled_quantity() as i64,
+                    avg_cumulative_filled_price: 0.0, // TODO: 计算平均成交价格
+                    leaves_quantity: order.unfilled_quantity as i64,
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    rejection_reason: trade_protocal_lite::RejectionReason::ReasonUnspecified as i32,
+                    reject_message: "撤单请求已提交".to_string(),
+                    commission: 0.0,
+                };
+
+                Ok(ProtoBody::OrderUpdateResponse(response))
+            }
+            Err(e) => {
+                warn!("撤单请求失败: order_id={}, error={}", req.server_order_id_to_cancel, e);
+                
+                let response = OrderUpdateResponse {
+                    account_id: req.account_id,
+                    server_order_id: req.server_order_id_to_cancel,
+                    client_order_id: order.order_id.to_string(),
+                    stock_code: order.stock_id.to_string(),
+                    side: match order.side {
+                        EngineOrderSide::Buy => trade_protocal_lite::OrderSide::Buy as i32,
+                        EngineOrderSide::Sell => trade_protocal_lite::OrderSide::Sell as i32,
+                    },
+                    r#type: trade_protocal_lite::OrderType::Limit as i32,
+                    status: trade_protocal_lite::OrderStatus::Rejected as i32,
+                    filled_quantity_this_event: 0,
+                    avg_filled_price_this_event: 0.0,
+                    cumulative_filled_quantity: order.filled_quantity() as i64,
+                    avg_cumulative_filled_price: 0.0,
+                    leaves_quantity: order.unfilled_quantity as i64,
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    rejection_reason: trade_protocal_lite::RejectionReason::Other as i32,
+                    reject_message: e,
+                    commission: 0.0,
+                };
+
+                Ok(ProtoBody::OrderUpdateResponse(response))
+            }
+        }
     }
 
     /// 处理市场数据请求
@@ -253,7 +398,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_dispatch() {
-        let dispatcher = MessageDispatcher::new(1);
+        let (order_engine, _order_rx, _match_tx) = 
+            OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
+        let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine));
         let heartbeat = Heartbeat {
             client_timestamp_utc: chrono::Utc::now().to_rfc3339(),
         };
@@ -276,7 +423,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_dispatch() {
-        let dispatcher = MessageDispatcher::new(1);
+        let (order_engine, _order_rx, _match_tx) = 
+            OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
+        let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine));
         let login_req = LoginRequest {
             user_id: "test_user".to_string(),
             password: "password".to_string(),
@@ -301,7 +450,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_order_dispatch() {
-        let dispatcher = MessageDispatcher::new(1);
+        let (order_engine, _order_rx, _match_tx) = 
+            OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
+        let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine));
         let order_req = NewOrderRequest {
             account_id: "test_account".to_string(),
             client_order_id: "client_order_1".to_string(),

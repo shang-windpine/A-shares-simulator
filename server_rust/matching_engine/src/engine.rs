@@ -10,19 +10,18 @@
 //！                ↓
 //！            外部系统
 
-use order_engine::{Order, OrderSide, OrderNotification}; // OrderStatus, OrderSide 可能被 StockOrderBook 需要
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
 use tracing::{error, info, instrument};
-use order_engine::{OrderStatus, OrderType};
-use uuid::Uuid;
 
-// 使用core_entities中的共享类型
-use core_entities::{MatchNotification, Trade, TradeExecution, OrderStatusInTrade};
+// 使用 core_entities 中的共享类型
+use core_entities::{
+    MatchNotification, Trade, TradeExecution, OrderStatusInTrade,
+    Order, OrderSide, OrderType, OrderStatus, OrderNotification, StockSpecificNotification
+};
 
 // 每个股票的订单簿
 #[derive(Debug)]
@@ -262,13 +261,6 @@ impl StockOrderBook {
     }
 }
 
-// 用于与每个股票任务通信
-#[derive(Debug, Clone)]
-pub enum StockSpecificNotification {
-    NewOrder(Order),
-    CancelOrder { order_id: Arc<str> },
-}
-
 pub struct MatchingEngine {
     order_notifier_rx: mpsc::Receiver<OrderNotification>,
     match_result_tx: Arc<mpsc::Sender<MatchNotification>>,
@@ -387,7 +379,6 @@ async fn run_stock_matching_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use order_engine::{Order, OrderSide, OrderStatus, OrderType};
     use rust_decimal_macros::dec;
     use std::time::Duration;
     use tokio::time::timeout;

@@ -393,14 +393,14 @@ impl OrderEngineFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OrderSide, OrderType};
+    use crate::OrderSide;
     use rust_decimal_macros::dec;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_order_engine_basic_flow() {
         let config = OrderEngineConfig::default();
-        let (mut engine, mut order_rx, match_tx) = 
+        let (mut engine, order_rx, match_tx) = 
             OrderEngineFactory::create_with_channels(None, config);
 
         // 启动引擎在后台
