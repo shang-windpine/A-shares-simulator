@@ -2,6 +2,9 @@ use std::sync::Arc;
 use tracing::{info, error};
 use order_engine::{OrderEngine, OrderEngineConfig, OrderEngineFactory};
 use matching_engine::engine::MatchingEngine;
+use market_data_engine::engine::{MarketDataEngine, MarketDataEngineConfig};
+use market_data_engine::data_types::{MarketDataNotification, MarketDataRequest, MarketDataResponse};
+use market_data_engine::database::{MySqlMarketDataRepository, DatabaseConfig};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -15,6 +18,10 @@ pub struct AppConfig {
     pub server_config: ServerConfig,
     /// 订单引擎配置
     pub order_engine_config: OrderEngineConfig,
+    /// 市场数据引擎配置
+    pub market_data_engine_config: MarketDataEngineConfig,
+    /// 数据库配置
+    pub database_config: DatabaseConfig,
 }
 
 impl Default for AppConfig {
@@ -22,6 +29,8 @@ impl Default for AppConfig {
         Self {
             server_config: ServerConfig::default(),
             order_engine_config: OrderEngineConfig::default(),
+            market_data_engine_config: MarketDataEngineConfig::default(),
+            database_config: DatabaseConfig::default(),
         }
     }
 }
@@ -32,10 +41,8 @@ pub struct AppServices {
     pub order_engine: Arc<OrderEngine>,
     /// 撮合引擎实例
     pub matching_engine: MatchingEngine,
-    /// 订单引擎任务句柄
-    pub order_engine_handle: Option<JoinHandle<Result<(), String>>>,
-    /// 撮合引擎任务句柄
-    pub matching_engine_handle: Option<JoinHandle<()>>,
+    /// 市场数据引擎实例
+    pub market_data_engine: MarketDataEngine,
 }
 
 /// 应用程序主入口，负责管理各种服务的生命周期
@@ -74,12 +81,38 @@ impl App {
         let matching_engine = MatchingEngine::new(order_notification_rx, match_notification_tx);
         info!("撮合引擎初始化完成");
 
-        // 3. 存储服务引用
+        // 3. 创建市场数据引擎相关的channels
+        let (market_data_notification_tx, _market_data_notification_rx) = 
+            mpsc::channel::<MarketDataNotification>(self.config.market_data_engine_config.notification_buffer_size);
+        let (market_data_request_tx, market_data_request_rx) = 
+            mpsc::channel::<MarketDataRequest>(self.config.market_data_engine_config.request_buffer_size);
+        let (market_data_response_tx, _market_data_response_rx) = 
+            mpsc::channel::<MarketDataResponse>(self.config.market_data_engine_config.request_buffer_size);
+
+        // 4. 创建市场数据引擎的MySQL仓库
+        let repository = Arc::new(MySqlMarketDataRepository::new(
+            self.config.database_config.clone()
+        ).await.map_err(|e| ConnectionError::application_with_source(
+            "创建MySQL仓库失败".to_string(), 
+            e
+        ))?);
+
+        // 5. 创建市场数据引擎
+        let market_data_engine = MarketDataEngine::new(
+            self.config.market_data_engine_config.clone(),
+            repository,
+            mpsc::channel(100).1, // 临时的match_notification_rx，后续需要连接到真实的撮合引擎
+            market_data_notification_tx,
+            market_data_request_rx,
+            market_data_response_tx,
+        );
+        info!("市场数据引擎初始化完成");
+
+        // 6. 存储服务引用
         self.services = Some(AppServices {
             order_engine: Arc::new(order_engine),
             matching_engine,
-            order_engine_handle: None,
-            matching_engine_handle: None,
+            market_data_engine,
         });
 
         info!("所有服务初始化完成");
@@ -91,18 +124,20 @@ impl App {
         if let Some(services) = &mut self.services {
             info!("启动业务服务");
 
+            // 启动订单引擎
+            services.order_engine.start().await
+                .map_err(|e| ConnectionError::Application(format!("订单引擎启动失败: {}", e)))?;
+            info!("订单引擎已启动");
+
             // 启动撮合引擎
-            let mut matching_engine = std::mem::replace(&mut services.matching_engine, 
-                MatchingEngine::new(mpsc::channel(1).1, mpsc::channel(1).0)); // 临时替换
-            
-            let matching_engine_handle = tokio::spawn(async move {
-                matching_engine.run().await;
-            });
-            services.matching_engine_handle = Some(matching_engine_handle);
+            services.matching_engine.start().await
+                .map_err(|e| ConnectionError::Application(format!("撮合引擎启动失败: {}", e)))?;
             info!("撮合引擎已启动");
 
-            // 注意：OrderEngine 不需要单独启动，它是通过方法调用来工作的
-            // 但是如果需要启动清理任务等，可以在这里添加
+            // 启动市场数据引擎
+            services.market_data_engine.start().await
+                .map_err(|e| ConnectionError::Application(format!("市场数据引擎启动失败: {}", e)))?;
+            info!("市场数据引擎已启动");
 
             info!("所有业务服务启动完成");
         } else {
@@ -145,26 +180,25 @@ impl App {
         info!("开始应用程序优雅关闭");
 
         if let Some(services) = &mut self.services {
-            // 关闭撮合引擎
-            if let Some(handle) = services.matching_engine_handle.take() {
-                info!("关闭撮合引擎");
-                handle.abort();
-                match handle.await {
-                    Ok(_) => info!("撮合引擎正常关闭"),
-                    Err(e) if e.is_cancelled() => info!("撮合引擎被取消"),
-                    Err(e) => error!("撮合引擎关闭时出错: {}", e),
-                }
+            // 关闭市场数据引擎
+            if let Err(e) = services.market_data_engine.stop().await {
+                error!("市场数据引擎关闭失败: {}", e);
+            } else {
+                info!("市场数据引擎正常关闭");
             }
 
-            // 关闭订单引擎（如果有需要）
-            if let Some(handle) = services.order_engine_handle.take() {
-                info!("关闭订单引擎");
-                handle.abort();
-                match handle.await {
-                    Ok(_) => info!("订单引擎正常关闭"),
-                    Err(e) if e.is_cancelled() => info!("订单引擎被取消"),
-                    Err(e) => error!("订单引擎关闭时出错: {}", e),
-                }
+            // 关闭撮合引擎
+            if let Err(e) = services.matching_engine.stop().await {
+                error!("撮合引擎关闭失败: {}", e);
+            } else {
+                info!("撮合引擎正常关闭");
+            }
+
+            // 关闭订单引擎
+            if let Err(e) = services.order_engine.stop().await {
+                error!("订单引擎关闭失败: {}", e);
+            } else {
+                info!("订单引擎正常关闭");
             }
 
             info!("清理业务服务完成");
@@ -206,11 +240,94 @@ mod tests {
         let result = app.start_services().await;
         assert!(result.is_ok());
         
-        // 验证服务句柄存在
+        // 验证服务运行状态
         let services = app.services().unwrap();
-        assert!(services.matching_engine_handle.is_some());
+        assert!(services.matching_engine.is_running());
+        assert!(services.order_engine.is_running().await);
         
         // 清理
         app.shutdown().await.unwrap();
+    }
+}
+
+// 临时的模拟市场数据仓库实现
+use market_data_engine::database::{MarketDataRepository, DatabaseError};
+use market_data_engine::data_types::{StaticMarketData, MarketData};
+use chrono::NaiveDate;
+
+struct MockMarketDataRepository;
+
+impl MockMarketDataRepository {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketDataRepository for MockMarketDataRepository {
+    async fn get_static_market_data(
+        &self,
+        stock_id: &str,
+        trade_date: NaiveDate,
+    ) -> Result<StaticMarketData, DatabaseError> {
+        Err(DatabaseError::StaticDataNotFound {
+            stock_id: stock_id.to_string(),
+            trade_date,
+        })
+    }
+
+    async fn get_multiple_static_market_data(
+        &self,
+        _stock_ids: &[&str],
+        _trade_date: NaiveDate,
+    ) -> Result<Vec<StaticMarketData>, DatabaseError> {
+        Ok(vec![])
+    }
+
+    async fn get_all_static_market_data(
+        &self,
+        _trade_date: NaiveDate,
+    ) -> Result<Vec<StaticMarketData>, DatabaseError> {
+        Ok(vec![])
+    }
+
+    async fn get_complete_market_data(
+        &self,
+        stock_id: &str,
+        trade_date: NaiveDate,
+    ) -> Result<MarketData, DatabaseError> {
+        Err(DatabaseError::StaticDataNotFound {
+            stock_id: stock_id.to_string(),
+            trade_date,
+        })
+    }
+
+    async fn get_multiple_complete_market_data(
+        &self,
+        _stock_ids: &[&str],
+        _trade_date: NaiveDate,
+    ) -> Result<Vec<MarketData>, DatabaseError> {
+        Ok(vec![])
+    }
+
+    async fn get_all_complete_market_data(
+        &self,
+        _trade_date: NaiveDate,
+    ) -> Result<Vec<MarketData>, DatabaseError> {
+        Ok(vec![])
+    }
+
+    async fn save_static_market_data(
+        &self,
+        _data: &StaticMarketData,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    async fn save_multiple_static_market_data(
+        &self,
+        _data_list: &[StaticMarketData],
+    ) -> Result<(), DatabaseError> {
+        Ok(())
     }
 } 

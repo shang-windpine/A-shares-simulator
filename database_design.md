@@ -93,5 +93,3 @@
 | amount     | DECIMAL(20,2) |          | (周/月)成交额                         |
 | change     | DECIMAL(10,2) |          | (周/月)涨跌额                         |
 | pct_chg    | DECIMAL(10,4) |          | (周/月)涨跌幅 【基于除权后的昨收计算】  |
-
-</rewritten_file> 

@@ -75,6 +75,7 @@
 pub mod engine;
 pub mod data_types;
 pub mod database;
+pub mod service;
 
 // 重新导出主要类型
 pub use engine::{MarketDataEngine, MarketDataEngineBuilder, MarketDataEngineConfig, MarketDataEngineError};
@@ -83,6 +84,7 @@ pub use data_types::{
     MarketDataNotification, MarketDataRequest, MarketDataResponse
 };
 pub use database::{MarketDataRepository, MySqlMarketDataRepository, DatabaseConfig, DatabaseError};
+pub use service::MarketDataService;
 
 // 重新导出核心实体类型
 pub use core_entities::{

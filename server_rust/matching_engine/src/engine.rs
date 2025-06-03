@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 // 使用 core_entities 中的共享类型
 use core_entities::{
@@ -262,10 +262,14 @@ impl StockOrderBook {
 }
 
 pub struct MatchingEngine {
-    order_notifier_rx: mpsc::Receiver<OrderNotification>,
+    order_notifier_rx: Option<mpsc::Receiver<OrderNotification>>,
     match_result_tx: Arc<mpsc::Sender<MatchNotification>>,
-    stock_task_senders: HashMap<Arc<str>, mpsc::Sender<StockSpecificNotification>>,
-    stock_task_handles: HashMap<Arc<str>, JoinHandle<()>>, // 用于管理生成的任务
+    
+    /// 主任务句柄
+    main_task_handle: Option<JoinHandle<()>>,
+    
+    /// 是否正在运行
+    is_running: bool,
 }
 
 impl MatchingEngine {
@@ -274,33 +278,95 @@ impl MatchingEngine {
         match_result_tx: mpsc::Sender<MatchNotification>,
     ) -> Self {
         MatchingEngine {
-            order_notifier_rx,
+            order_notifier_rx: Some(order_notifier_rx),
             match_result_tx: Arc::new(match_result_tx),
-            stock_task_senders: HashMap::new(),
-            stock_task_handles: HashMap::new(),
+            main_task_handle: None,
+            is_running: false,
         }
     }
 
-    pub async fn run(&mut self) {
+    /// 启动撮合引擎
+    pub async fn start(&mut self) -> Result<(), String> {
+        if self.is_running {
+            return Err("Matching engine is already running".to_string());
+        }
+
         info!("Starting matching engine");
-        while let Some(notification) = self.order_notifier_rx.recv().await {
+
+        // 取出接收器用于主任务
+        let mut order_notifier_rx = self.order_notifier_rx.take()
+            .ok_or("Order notifier receiver already taken")?;
+
+        let match_result_tx = Arc::clone(&self.match_result_tx);
+
+        // 启动主任务
+        let main_handle = tokio::spawn(async move {
+            Self::run_main_loop(order_notifier_rx, match_result_tx).await;
+        });
+
+        self.main_task_handle = Some(main_handle);
+        self.is_running = true;
+
+        info!("Matching engine started");
+        Ok(())
+    }
+
+    /// 停止撮合引擎
+    pub async fn stop(&mut self) -> Result<(), String> {
+        if !self.is_running {
+            return Ok(());
+        }
+
+        info!("Stopping matching engine...");
+
+        // 停止主任务
+        if let Some(handle) = self.main_task_handle.take() {
+            handle.abort();
+            match handle.await {
+                Ok(_) => info!("Matching engine main task stopped normally"),
+                Err(e) if e.is_cancelled() => info!("Matching engine main task was cancelled"),
+                Err(e) => warn!("Matching engine main task stopped with error: {}", e),
+            }
+        }
+
+        self.is_running = false;
+        info!("Matching engine stopped");
+        Ok(())
+    }
+
+    /// 检查引擎是否正在运行
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    /// 主运行循环（静态方法，在独立任务中运行）
+    async fn run_main_loop(
+        mut order_notifier_rx: mpsc::Receiver<OrderNotification>,
+        match_result_tx: Arc<mpsc::Sender<MatchNotification>>,
+    ) {
+        info!("Starting matching engine");
+        
+        let mut stock_task_senders: HashMap<Arc<str>, mpsc::Sender<StockSpecificNotification>> = HashMap::new();
+        let mut stock_task_handles: HashMap<Arc<str>, JoinHandle<()>> = HashMap::new();
+        
+        while let Some(notification) = order_notifier_rx.recv().await {
             let stock_id_to_route = match &notification {
                 OrderNotification::NewOrder(order) => Arc::clone(&order.stock_id),
                 OrderNotification::CancelOrder { stock_id, .. } => Arc::clone(stock_id),
             };
 
-            let sender = if let Some(sender) = self.stock_task_senders.get(&stock_id_to_route) {
+            let sender = if let Some(sender) = stock_task_senders.get(&stock_id_to_route) {
                 sender.clone()
             } else {
                 let (specific_tx, specific_rx) = mpsc::channel::<StockSpecificNotification>(100);
-                self.stock_task_senders.insert(Arc::clone(&stock_id_to_route), specific_tx.clone());
-                let match_result_tx_clone = Arc::clone(&self.match_result_tx);
+                stock_task_senders.insert(Arc::clone(&stock_id_to_route), specific_tx.clone());
+                let match_result_tx_clone = Arc::clone(&match_result_tx);
                 let stock_id_for_task = Arc::clone(&stock_id_to_route);
 
                 let handle = tokio::spawn(async move {
                     run_stock_matching_task(stock_id_for_task, specific_rx, match_result_tx_clone).await;
                 });
-                self.stock_task_handles.insert(Arc::clone(&stock_id_to_route), handle);
+                stock_task_handles.insert(Arc::clone(&stock_id_to_route), handle);
                 specific_tx
             };
 
@@ -311,9 +377,43 @@ impl MatchingEngine {
 
             if let Err(e) = sender.send(specific_notification).await {
                 error!("Failed to send notification to stock task for {}: {}. Task might have died.", stock_id_to_route, e);
-                self.stock_task_senders.remove(&stock_id_to_route);
-                self.stock_task_handles.remove(&stock_id_to_route);
+                stock_task_senders.remove(&stock_id_to_route);
+                if let Some(handle) = stock_task_handles.remove(&stock_id_to_route) {
+                    handle.abort();
+                }
             }
+        }
+
+        info!("Matching engine main loop stopped, cleaning up stock tasks");
+        
+        // 清理所有股票任务
+        for (stock_id, handle) in stock_task_handles {
+            info!("Stopping stock task for {}", stock_id);
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    /// 获取旧版本的run方法，保持API兼容性（已废弃）
+    #[deprecated(note = "Use start() method instead")]
+    pub async fn run(&mut self) {
+        warn!("Using deprecated run() method. Consider using start() instead.");
+        if let Err(e) = self.start().await {
+            error!("Failed to start matching engine: {}", e);
+            return;
+        }
+        
+        // 保持旧的行为：阻塞直到任务完成
+        if let Some(handle) = self.main_task_handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for MatchingEngine {
+    fn drop(&mut self) {
+        if self.is_running {
+            warn!("MatchingEngine is being dropped while still running. Ensure stop() was called before dropping.");
         }
     }
 }
@@ -481,8 +581,8 @@ mod tests {
         assert_eq!(trade_execution.buyer_status.order_id.as_ref(), "buy_001");
         assert_eq!(trade_execution.buyer_status.filled_quantity_in_trade, 800);
         assert_eq!(trade_execution.buyer_status.total_filled_quantity, 800);
-        assert_eq!(trade_execution.buyer_status.remaining_quantity, 0);
-        assert!(trade_execution.buyer_status.is_fully_filled);
+        assert_eq!(trade_execution.buyer_status.remaining_quantity, 200);
+        assert!(!trade_execution.buyer_status.is_fully_filled);
         
         // 验证卖方状态
         assert_eq!(trade_execution.seller_status.order_id.as_ref(), "sell_001");

@@ -105,7 +105,7 @@ pub struct MarketData {
     pub static_data: StaticMarketData,
     /// 动态数据
     pub dynamic_data: DynamicMarketData,
-    /// 扩展字段 - 预留给下一个迭代
+    /// 扩展字段 - 预留给下一迭代
     pub extended_data: ExtendedMarketData,
 }
 
@@ -118,6 +118,20 @@ impl MarketData {
         );
         
         let extended_data = ExtendedMarketData::new(Arc::clone(&static_data.stock_id));
+        
+        Self {
+            static_data,
+            dynamic_data,
+            extended_data,
+        }
+    }
+
+    /// 创建带有扩展数据的市场数据
+    pub fn new_with_extended(static_data: StaticMarketData, extended_data: ExtendedMarketData) -> Self {
+        let dynamic_data = DynamicMarketData::new(
+            Arc::clone(&static_data.stock_id),
+            static_data.trade_date,
+        );
         
         Self {
             static_data,

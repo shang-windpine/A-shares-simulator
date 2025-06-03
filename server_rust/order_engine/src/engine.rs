@@ -1,7 +1,7 @@
 use crate::{Order, OrderNotification, OrderStatus, OrderValidator};
 use crate::order_pool::{OrderPool, OrderPoolStats};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -38,6 +38,8 @@ impl Default for OrderEngineConfig {
 
 /// 订单引擎核心服务
 /// 负责管理订单池，处理订单请求，与匹配引擎通信
+/// 
+/// 使用内部可变性设计，支持在Arc中被启动和停止
 pub struct OrderEngine {
     /// 订单池
     order_pool: Arc<OrderPool>,
@@ -48,14 +50,26 @@ pub struct OrderEngine {
     /// 向匹配引擎发送订单通知的channel
     order_notification_tx: mpsc::Sender<OrderNotification>,
     
-    /// 从匹配引擎接收匹配结果的channel
-    match_notification_rx: mpsc::Receiver<MatchNotification>,
-    
     /// 配置
     config: OrderEngineConfig,
     
+    /// 内部状态（使用Mutex保护）
+    inner: Arc<Mutex<OrderEngineInner>>,
+}
+
+/// OrderEngine的内部可变状态
+struct OrderEngineInner {
+    /// 从匹配引擎接收匹配结果的channel
+    match_notification_rx: Option<mpsc::Receiver<MatchNotification>>,
+    
+    /// 主任务句柄
+    main_task_handle: Option<JoinHandle<()>>,
+    
+    /// 清理任务句柄
+    cleanup_task_handle: Option<JoinHandle<()>>,
+    
     /// 是否正在运行
-    running: bool,
+    is_running: bool,
 }
 
 impl OrderEngine {
@@ -66,57 +80,99 @@ impl OrderEngine {
         validator: Option<Arc<dyn OrderValidator>>,
         config: OrderEngineConfig,
     ) -> Self {
+        let inner = OrderEngineInner {
+            match_notification_rx: Some(match_notification_rx),
+            main_task_handle: None,
+            cleanup_task_handle: None,
+            is_running: false,
+        };
+
         Self {
             order_pool: Arc::new(OrderPool::new()),
             validator,
             order_notification_tx,
-            match_notification_rx,
             config,
-            running: false,
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
     /// 启动订单引擎
-    pub async fn start(&mut self) -> Result<(), String> {
-        if self.running {
+    pub async fn start(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        
+        if inner.is_running {
             return Err("Order engine is already running".to_string());
         }
 
         info!("Starting order engine...");
-        self.running = true;
+
+        // 取出接收器用于主任务
+        let mut match_notification_rx = inner.match_notification_rx.take()
+            .ok_or("Match notification receiver already taken")?;
 
         // 启动清理任务
         let cleanup_handle = self.start_cleanup_task().await;
+        inner.cleanup_task_handle = Some(cleanup_handle);
 
-        // 主运行循环
-        tokio::select! {
-            result = self.run_main_loop() => {
-                self.running = false;
-                if let Err(e) = result {
-                    error!("Order engine main loop error: {}", e);
-                    return Err(e);
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received shutdown signal");
-                self.running = false;
-            }
-        }
+        // 启动主处理任务
+        let order_pool = Arc::clone(&self.order_pool);
+        let main_handle = tokio::spawn(async move {
+            Self::run_main_loop(match_notification_rx, order_pool).await;
+        });
+        inner.main_task_handle = Some(main_handle);
 
-        // 清理资源
-        cleanup_handle.abort();
-        info!("Order engine stopped");
+        inner.is_running = true;
+        info!("Order engine started");
         Ok(())
     }
 
     /// 停止订单引擎
-    pub fn stop(&mut self) {
+    pub async fn stop(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        
+        if !inner.is_running {
+            return Ok(());
+        }
+
         info!("Stopping order engine...");
-        self.running = false;
+
+        // 停止主任务
+        if let Some(handle) = inner.main_task_handle.take() {
+            handle.abort();
+            match handle.await {
+                Ok(_) => info!("Order engine main task stopped normally"),
+                Err(e) if e.is_cancelled() => info!("Order engine main task was cancelled"),
+                Err(e) => warn!("Order engine main task stopped with error: {}", e),
+            }
+        }
+
+        // 停止清理任务
+        if let Some(handle) = inner.cleanup_task_handle.take() {
+            handle.abort();
+            match handle.await {
+                Ok(_) => info!("Order engine cleanup task stopped normally"),
+                Err(e) if e.is_cancelled() => info!("Order engine cleanup task was cancelled"),
+                Err(e) => warn!("Order engine cleanup task stopped with error: {}", e),
+            }
+        }
+
+        inner.is_running = false;
+        info!("Order engine stopped");
+        Ok(())
+    }
+
+    /// 检查引擎是否正在运行
+    pub async fn is_running(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.is_running
     }
 
     /// 提交新订单
     pub async fn submit_order(&self, mut order: Order) -> Result<String, String> {
+        if !self.is_running().await {
+            return Err("Order engine is not running".to_string());
+        }
+
         // 如果没有订单ID，生成一个
         if order.order_id.is_empty() {
             order.order_id = Uuid::new_v4().to_string().into();
@@ -152,6 +208,10 @@ impl OrderEngine {
 
     /// 取消订单
     pub async fn cancel_order(&self, order_id: &str, stock_id: &str) -> Result<(), String> {
+        if !self.is_running().await {
+            return Err("Order engine is not running".to_string());
+        }
+
         info!("Cancelling order: {}", order_id);
 
         // 检查订单是否存在于池中
@@ -219,32 +279,27 @@ impl OrderEngine {
         &self.order_pool
     }
 
-    /// 主运行循环
-    async fn run_main_loop(&mut self) -> Result<(), String> {
+    /// 主运行循环（静态方法，在独立任务中运行）
+    async fn run_main_loop(
+        mut match_notification_rx: mpsc::Receiver<MatchNotification>,
+        order_pool: Arc<OrderPool>,
+    ) {
         info!("Order engine main loop started");
 
-        while self.running {
-            tokio::select! {
-                // 处理来自匹配引擎的通知
-                Some(notification) = self.match_notification_rx.recv() => {
-                    if let Err(e) = self.handle_match_notification(notification).await {
-                        error!("Error handling match notification: {}", e);
-                    }
-                }
-                // 如果channel关闭，退出循环
-                else => {
-                    warn!("Match notification channel closed");
-                    break;
-                }
+        while let Some(notification) = match_notification_rx.recv().await {
+            if let Err(e) = Self::handle_match_notification_static(notification, &order_pool).await {
+                error!("Error handling match notification: {}", e);
             }
         }
 
         info!("Order engine main loop stopped");
-        Ok(())
     }
 
-    /// 处理来自匹配引擎的通知
-    pub async fn handle_match_notification(&self, notification: MatchNotification) -> Result<(), String> {
+    /// 处理来自匹配引擎的通知（静态方法）
+    async fn handle_match_notification_static(
+        notification: MatchNotification,
+        order_pool: &Arc<OrderPool>,
+    ) -> Result<(), String> {
         match notification {
             MatchNotification::TradeExecuted(trade_execution) => {
                 debug!(
@@ -255,17 +310,19 @@ impl OrderEngine {
                 );
 
                 // 更新买方订单
-                if let Err(e) = self.update_order_on_trade(
+                if let Err(e) = Self::update_order_on_trade_static(
                     &trade_execution.buyer_status.order_id,
                     trade_execution.buyer_status.filled_quantity_in_trade,
+                    order_pool,
                 ) {
                     error!("Failed to update buyer order {}: {}", trade_execution.buyer_status.order_id, e);
                 }
 
                 // 更新卖方订单
-                if let Err(e) = self.update_order_on_trade(
+                if let Err(e) = Self::update_order_on_trade_static(
                     &trade_execution.seller_status.order_id,
                     trade_execution.seller_status.filled_quantity_in_trade,
+                    order_pool,
                 ) {
                     error!("Failed to update seller order {}: {}", trade_execution.seller_status.order_id, e);
                 }
@@ -284,7 +341,7 @@ impl OrderEngine {
             } => {
                 debug!("Handling order cancelled: {}", order_id);
                 
-                if let Err(e) = self.order_pool.cancel_order(&order_id) {
+                if let Err(e) = order_pool.cancel_order(&order_id) {
                     error!("Failed to cancel order {}: {}", order_id, e);
                 } else {
                     info!("Successfully cancelled order: {}", order_id);
@@ -307,10 +364,14 @@ impl OrderEngine {
         Ok(())
     }
 
-    /// 根据交易结果更新订单
-    fn update_order_on_trade(&self, order_id: &str, filled_quantity: u64) -> Result<(), String> {
+    /// 根据交易结果更新订单（静态方法）
+    fn update_order_on_trade_static(
+        order_id: &str, 
+        filled_quantity: u64,
+        order_pool: &Arc<OrderPool>,
+    ) -> Result<(), String> {
         // 获取订单检查是否存在
-        let order_arc = self.order_pool
+        let order_arc = order_pool
             .get_order(order_id)
             .ok_or_else(|| format!("Order {} not found in pool", order_id))?;
 
@@ -338,7 +399,7 @@ impl OrderEngine {
         };
 
         // 使用订单池的方法更新状态（这会正确更新索引和统计信息）
-        self.order_pool.update_order(order_id, new_status, filled_quantity)
+        order_pool.update_order(order_id, new_status, filled_quantity)
     }
 
     /// 启动清理任务
@@ -365,6 +426,14 @@ impl OrderEngine {
                 }
             }
         })
+    }
+}
+
+impl Drop for OrderEngine {
+    fn drop(&mut self) {
+        // 注意：Drop trait不能是async的，所以我们只能记录警告
+        // 实际的清理工作应该在调用stop()方法时完成
+        warn!("OrderEngine is being dropped. Ensure stop() was called before dropping.");
     }
 }
 
@@ -499,7 +568,7 @@ mod tests {
         });
 
         // 直接调用处理方法
-        engine.handle_match_notification(trade_notification).await.unwrap();
+        OrderEngine::handle_match_notification_static(trade_notification, &engine.order_pool).await.unwrap();
         
         // 验证订单状态更新
         let updated_order = engine.get_order("test_order_001").unwrap();
@@ -537,7 +606,7 @@ mod tests {
             },
         });
 
-        engine.handle_match_notification(trade_notification_2).await.unwrap();
+        OrderEngine::handle_match_notification_static(trade_notification_2, &engine.order_pool).await.unwrap();
         
         let final_order = engine.get_order("test_order_001").unwrap();
         assert_eq!(final_order.unfilled_quantity, 0);
@@ -575,7 +644,7 @@ mod tests {
         };
 
         // 直接调用处理方法
-        engine.handle_match_notification(cancel_notification).await.unwrap();
+        OrderEngine::handle_match_notification_static(cancel_notification, &engine.order_pool).await.unwrap();
         
         // 验证订单状态更新为已取消
         let cancelled_order = engine.get_order("test_order_cancel").unwrap();

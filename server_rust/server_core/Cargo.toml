@@ -16,8 +16,10 @@ anyhow = "1.0.98" # 可选，用于简化错误处理
 trade_protocal_lite = { path = "../trade_protocal_lite" }
 order_engine = { path = "../order_engine" }
 matching_engine = { path = "../matching_engine" }
+market_data_engine = { path = "../market_data_engine" }
 core_entities = { path = "../core_entities" }
 rust_decimal = "1.36.0"
+rust_decimal_macros = "1.36.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 chrono = "0.4"

@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn, instrument};
 use rust_decimal_macros::dec;
+use dashmap::DashMap;
 
 use crate::data_types::{
     MarketData, StaticMarketData, DynamicMarketData, 
@@ -14,6 +15,7 @@ use crate::data_types::{
 };
 use crate::database::{MarketDataRepository, DatabaseError};
 use core_entities::{MatchNotification, TradeExecution, Trade, Timestamp};
+use crate::service::MarketDataService;
 
 /// 市场行情引擎配置
 #[derive(Debug, Clone)]
@@ -31,7 +33,7 @@ pub struct MarketDataEngineConfig {
 impl Default for MarketDataEngineConfig {
     fn default() -> Self {
         Self {
-            trade_date: chrono::Local::now().date_naive(),
+            trade_date: chrono::NaiveDate::from_ymd_opt(2024, 9, 23).unwrap(),
             auto_load_all_market_data: true,
             notification_buffer_size: 1000,
             request_buffer_size: 100,
@@ -65,7 +67,7 @@ pub struct MarketDataEngine {
     /// 数据存储
     repository: Arc<dyn MarketDataRepository>,
     /// 内存中的市场数据缓存
-    market_data_cache: Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+    market_data_cache: Arc<DashMap<Arc<str>, MarketData>>,
     /// 撮合引擎通知接收器
     match_notification_rx: Option<mpsc::Receiver<MatchNotification>>,
     /// 市场数据通知发送器
@@ -74,10 +76,10 @@ pub struct MarketDataEngine {
     market_data_request_rx: Option<mpsc::Receiver<MarketDataRequest>>,
     /// 市场数据响应发送器
     market_data_response_tx: mpsc::Sender<MarketDataResponse>,
-    /// 引擎任务句柄
-    engine_handle: Option<JoinHandle<()>>,
+    /// 主任务句柄
+    main_task_handle: Option<JoinHandle<()>>,
     /// 是否正在运行
-    is_running: Arc<RwLock<bool>>,
+    is_running: bool,
 }
 
 impl MarketDataEngine {
@@ -93,13 +95,13 @@ impl MarketDataEngine {
         Self {
             config,
             repository,
-            market_data_cache: Arc::new(RwLock::new(HashMap::new())),
+            market_data_cache: Arc::new(DashMap::new()),
             match_notification_rx: Some(match_notification_rx),
             market_data_notification_tx,
             market_data_request_rx: Some(market_data_request_rx),
             market_data_response_tx,
-            engine_handle: None,
-            is_running: Arc::new(RwLock::new(false)),
+            main_task_handle: None,
+            is_running: false,
         }
     }
 
@@ -109,13 +111,9 @@ impl MarketDataEngine {
         info!("正在启动市场行情引擎...");
         
         // 检查是否已经在运行
-        {
-            let mut running = self.is_running.write().await;
-            if *running {
-                warn!("市场行情引擎已经在运行");
-                return Ok(());
-            }
-            *running = true;
+        if self.is_running {
+            warn!("市场行情引擎已经在运行");
+            return Err(MarketDataEngineError::ConfigError("引擎已在运行".to_string()));
         }
 
         // 初始化市场数据
@@ -125,16 +123,15 @@ impl MarketDataEngine {
 
         // 启动主循环
         let match_notification_rx = self.match_notification_rx.take()
-            .ok_or(MarketDataEngineError::ConfigError("撮合通知接收器已被占用".to_string()))?;
+            .ok_or(MarketDataEngineError::ConfigError("撮合通知接收器未初始化".to_string()))?;
         
         let market_data_request_rx = self.market_data_request_rx.take()
-            .ok_or(MarketDataEngineError::ConfigError("市场数据请求接收器已被占用".to_string()))?;
+            .ok_or(MarketDataEngineError::ConfigError("市场数据请求接收器未初始化".to_string()))?;
 
         let market_data_cache = Arc::clone(&self.market_data_cache);
         let market_data_notification_tx = self.market_data_notification_tx.clone();
         let market_data_response_tx = self.market_data_response_tx.clone();
         let repository = Arc::clone(&self.repository);
-        let is_running = Arc::clone(&self.is_running);
         let trade_date = self.config.trade_date;
 
         let handle = tokio::spawn(async move {
@@ -145,12 +142,13 @@ impl MarketDataEngine {
                 market_data_notification_tx,
                 market_data_response_tx,
                 repository,
-                is_running,
                 trade_date,
             ).await;
         });
 
-        self.engine_handle = Some(handle);
+        self.main_task_handle = Some(handle);
+        self.is_running = true;
+
         info!("市场行情引擎启动完成");
         Ok(())
     }
@@ -158,35 +156,43 @@ impl MarketDataEngine {
     /// 停止引擎
     #[instrument(skip(self))]
     pub async fn stop(&mut self) -> Result<(), MarketDataEngineError> {
-        info!("正在停止市场行情引擎...");
-        
-        // 设置停止标志
-        {
-            let mut running = self.is_running.write().await;
-            *running = false;
+        if !self.is_running {
+            return Ok(());
         }
 
-        // 等待引擎任务完成
-        if let Some(handle) = self.engine_handle.take() {
-            if let Err(e) = handle.await {
-                error!("等待引擎任务完成时发生错误: {}", e);
+        info!("正在停止市场行情引擎...");
+        
+        // 停止主任务
+        if let Some(handle) = self.main_task_handle.take() {
+            handle.abort();
+            match handle.await {
+                Ok(_) => info!("市场数据引擎主任务正常停止"),
+                Err(e) if e.is_cancelled() => info!("市场数据引擎主任务被取消"),
+                Err(e) => warn!("市场数据引擎主任务停止时出错: {}", e),
             }
         }
 
+        self.is_running = false;
         info!("市场行情引擎已停止");
         Ok(())
     }
 
+    /// 检查引擎是否正在运行
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
     /// 获取市场数据
     pub async fn get_market_data(&self, stock_id: &str) -> Option<MarketData> {
-        let cache = self.market_data_cache.read().await;
-        cache.get(stock_id).cloned()
+        self.market_data_cache.get(stock_id).map(|entry| entry.value().clone())
     }
 
     /// 获取所有市场数据
     pub async fn get_all_market_data(&self) -> HashMap<Arc<str>, MarketData> {
-        let cache = self.market_data_cache.read().await;
-        cache.clone()
+        self.market_data_cache
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
     }
 
     /// 加载全市场数据
@@ -198,40 +204,29 @@ impl MarketDataEngine {
             .get_all_static_market_data(self.config.trade_date)
             .await?;
 
-        let mut cache = self.market_data_cache.write().await;
         for static_data in static_data_list {
             let market_data = MarketData::new(static_data.clone());
-            cache.insert(Arc::clone(&static_data.stock_id), market_data);
+            self.market_data_cache.insert(Arc::clone(&static_data.stock_id), market_data);
         }
 
-        info!("成功加载了 {} 只股票的市场数据", cache.len());
+        info!("成功加载了 {} 只股票的市场数据", self.market_data_cache.len());
         Ok(())
     }
 
-    /// 引擎主循环
+    /// 引擎主循环（静态方法，在独立任务中运行）
     #[instrument(skip_all)]
     async fn run_engine_loop(
         mut match_notification_rx: mpsc::Receiver<MatchNotification>,
         mut market_data_request_rx: mpsc::Receiver<MarketDataRequest>,
-        market_data_cache: Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+        market_data_cache: Arc<DashMap<Arc<str>, MarketData>>,
         market_data_notification_tx: mpsc::Sender<MarketDataNotification>,
         market_data_response_tx: mpsc::Sender<MarketDataResponse>,
         repository: Arc<dyn MarketDataRepository>,
-        is_running: Arc<RwLock<bool>>,
         trade_date: NaiveDate,
     ) {
         info!("市场行情引擎主循环开始运行");
 
         loop {
-            // 检查是否应该停止
-            {
-                let running = is_running.read().await;
-                if !*running {
-                    info!("收到停止信号，退出引擎主循环");
-                    break;
-                }
-            }
-
             tokio::select! {
                 // 处理撮合引擎通知
                 Some(match_notification) = match_notification_rx.recv() => {
@@ -254,9 +249,10 @@ impl MarketDataEngine {
                     ).await;
                 }
                 
-                // 没有更多消息时，短暂等待
+                // 没有更多消息时，退出循环
                 else => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    info!("所有通道都已关闭，退出主循环");
+                    break;
                 }
             }
         }
@@ -268,7 +264,7 @@ impl MarketDataEngine {
     #[instrument(skip_all)]
     async fn handle_match_notification(
         notification: MatchNotification,
-        market_data_cache: &Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+        market_data_cache: &Arc<DashMap<Arc<str>, MarketData>>,
         market_data_notification_tx: &mpsc::Sender<MarketDataNotification>,
         trade_date: NaiveDate,
     ) {
@@ -295,7 +291,7 @@ impl MarketDataEngine {
     #[instrument(skip_all)]
     async fn process_trade_execution(
         trade_execution: TradeExecution,
-        market_data_cache: &Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+        market_data_cache: &Arc<DashMap<Arc<str>, MarketData>>,
         market_data_notification_tx: &mpsc::Sender<MarketDataNotification>,
         trade_date: NaiveDate,
     ) {
@@ -304,8 +300,7 @@ impl MarketDataEngine {
 
         // 更新市场数据
         {
-            let mut cache = market_data_cache.write().await;
-            let market_data = cache.entry(Arc::clone(&stock_id)).or_insert_with(|| {
+            let mut market_data = market_data_cache.entry(Arc::clone(&stock_id)).or_insert_with(|| {
                 // 如果缓存中没有该股票数据，创建一个默认的
                 warn!("股票 {} 的市场数据不在缓存中，创建默认数据", stock_id);
                 let static_data = StaticMarketData {
@@ -342,11 +337,10 @@ impl MarketDataEngine {
         }
 
         // 发送市场数据更新通知
-        let cache = market_data_cache.read().await;
-        if let Some(market_data) = cache.get(&stock_id) {
+        if let Some(market_data_entry) = market_data_cache.get(&stock_id) {
             let update_notification = MarketDataNotification::MarketDataUpdated {
                 stock_id: Arc::clone(&stock_id),
-                market_data: market_data.clone(),
+                market_data: market_data_entry.value().clone(),
                 timestamp: Utc::now(),
             };
 
@@ -360,16 +354,15 @@ impl MarketDataEngine {
     #[instrument(skip_all)]
     async fn handle_market_data_request(
         request: MarketDataRequest,
-        market_data_cache: &Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+        market_data_cache: &Arc<DashMap<Arc<str>, MarketData>>,
         market_data_response_tx: &mpsc::Sender<MarketDataResponse>,
         repository: &Arc<dyn MarketDataRepository>,
         trade_date: NaiveDate,
     ) {
         let response = match request {
             MarketDataRequest::GetMarketData { stock_id } => {
-                let cache = market_data_cache.read().await;
-                match cache.get(&stock_id) {
-                    Some(market_data) => MarketDataResponse::MarketData(market_data.clone()),
+                match market_data_cache.get(&stock_id) {
+                    Some(entry) => MarketDataResponse::MarketData(entry.value().clone()),
                     None => MarketDataResponse::Error {
                         error_message: format!("股票 {} 的市场数据未找到", stock_id),
                         timestamp: Utc::now(),
@@ -378,11 +371,10 @@ impl MarketDataEngine {
             }
             
             MarketDataRequest::GetMultipleMarketData { stock_ids } => {
-                let cache = market_data_cache.read().await;
                 let mut results = Vec::new();
                 for stock_id in stock_ids {
-                    if let Some(market_data) = cache.get(&stock_id) {
-                        results.push(market_data.clone());
+                    if let Some(entry) = market_data_cache.get(&stock_id) {
+                        results.push(entry.value().clone());
                     }
                 }
                 MarketDataResponse::MultipleMarketData(results)
@@ -432,7 +424,7 @@ impl MarketDataEngine {
     async fn reload_static_data(
         stock_id: Option<Arc<str>>,
         trade_date: NaiveDate,
-        market_data_cache: &Arc<RwLock<HashMap<Arc<str>, MarketData>>>,
+        market_data_cache: &Arc<DashMap<Arc<str>, MarketData>>,
         repository: &Arc<dyn MarketDataRepository>,
     ) -> Result<usize, DatabaseError> {
         match stock_id {
@@ -442,9 +434,8 @@ impl MarketDataEngine {
                     .get_static_market_data(stock_id.as_ref(), trade_date)
                     .await?;
                 
-                let mut cache = market_data_cache.write().await;
                 let market_data = MarketData::new(static_data);
-                cache.insert(stock_id, market_data);
+                market_data_cache.insert(stock_id, market_data);
                 Ok(1)
             }
             None => {
@@ -453,16 +444,23 @@ impl MarketDataEngine {
                     .get_all_static_market_data(trade_date)
                     .await?;
 
-                let mut cache = market_data_cache.write().await;
-                cache.clear();
+                market_data_cache.clear();
                 
                 for static_data in &static_data_list {
                     let market_data = MarketData::new(static_data.clone());
-                    cache.insert(Arc::clone(&static_data.stock_id), market_data);
+                    market_data_cache.insert(Arc::clone(&static_data.stock_id), market_data);
                 }
                 
                 Ok(static_data_list.len())
             }
+        }
+    }
+}
+
+impl Drop for MarketDataEngine {
+    fn drop(&mut self) {
+        if self.is_running {
+            warn!("MarketDataEngine is being dropped while still running. Ensure stop() was called before dropping.");
         }
     }
 }
@@ -531,6 +529,43 @@ impl MarketDataEngineBuilder {
 impl Default for MarketDataEngineBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// 为 MarketDataEngine 实现 MarketDataService trait
+#[async_trait::async_trait]
+impl MarketDataService for MarketDataEngine {
+    async fn get_market_data(&self, stock_id: &str) -> Option<MarketData> {
+        self.market_data_cache.get(stock_id).map(|entry| entry.value().clone())
+    }
+
+    async fn get_multiple_market_data(&self, stock_ids: &[&str]) -> Vec<MarketData> {
+        let mut results = Vec::new();
+        for stock_id in stock_ids {
+            if let Some(entry) = self.market_data_cache.get(*stock_id) {
+                results.push(entry.value().clone());
+            }
+        }
+        results
+    }
+
+    async fn subscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
+        // 在当前实现中，所有股票的数据都会自动更新
+        // 这里可以在未来扩展为真正的订阅机制
+        Ok(())
+    }
+
+    async fn unsubscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
+        // 预留接口，未来可以实现真正的取消订阅逻辑
+        Ok(())
+    }
+
+    async fn health_check(&self) -> bool {
+        self.is_running
+    }
+
+    async fn get_available_stocks(&self) -> Vec<Arc<str>> {
+        self.market_data_cache.iter().map(|entry| entry.key().clone()).collect()
     }
 }
 
@@ -616,6 +651,38 @@ mod tests {
             Ok(results)
         }
 
+        async fn get_complete_market_data(
+            &self,
+            stock_id: &str,
+            trade_date: NaiveDate,
+        ) -> Result<MarketData, DatabaseError> {
+            let static_data = self.get_static_market_data(stock_id, trade_date).await?;
+            Ok(MarketData::new(static_data))
+        }
+
+        async fn get_multiple_complete_market_data(
+            &self,
+            stock_ids: &[&str],
+            trade_date: NaiveDate,
+        ) -> Result<Vec<MarketData>, DatabaseError> {
+            let static_data_list = self.get_multiple_static_market_data(stock_ids, trade_date).await?;
+            let results = static_data_list.into_iter()
+                .map(|static_data| MarketData::new(static_data))
+                .collect();
+            Ok(results)
+        }
+
+        async fn get_all_complete_market_data(
+            &self,
+            trade_date: NaiveDate,
+        ) -> Result<Vec<MarketData>, DatabaseError> {
+            let static_data_list = self.get_all_static_market_data(trade_date).await?;
+            let results = static_data_list.into_iter()
+                .map(|static_data| MarketData::new(static_data))
+                .collect();
+            Ok(results)
+        }
+
         async fn save_static_market_data(
             &self,
             data: &StaticMarketData,
@@ -656,7 +723,7 @@ mod tests {
             response_tx,
         );
 
-        assert!(!*engine.is_running.read().await);
+        assert!(!engine.is_running);
     }
 
     #[tokio::test]

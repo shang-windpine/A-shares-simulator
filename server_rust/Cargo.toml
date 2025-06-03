@@ -9,7 +9,7 @@ members = [
     "account_management",
     "server_core",
     "order_engine",
-    "market_data"
+    "market_data_engine"
 ]
 
 [workspace.dependencies]

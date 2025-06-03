@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::str::FromStr;
 use tracing::{debug, info, warn};
 use trade_protocal_lite::{TradeMessage, ProtoBody, protocol::*};
 use order_engine::{OrderEngine, Order, OrderSide as EngineOrderSide, OrderEngineFactory, OrderEngineConfig};
+use market_data_engine::{MarketDataService, MarketData};
 use rust_decimal::Decimal;
 
 use crate::error::{ConnectionError};
@@ -13,6 +15,8 @@ pub struct MessageDispatcher {
     connection_id: ConnectionId,
     /// 订单引擎引用
     order_engine: Arc<OrderEngine>,
+    /// 市场数据服务引用
+    market_data_service: Option<Arc<dyn MarketDataService>>,
 }
 
 impl MessageDispatcher {
@@ -22,6 +26,21 @@ impl MessageDispatcher {
         Self { 
             connection_id,
             order_engine,
+            market_data_service: None,
+        }
+    }
+
+    /// 创建新的消息分发器（带有完整的服务依赖）
+    pub fn new_with_services(
+        connection_id: ConnectionId, 
+        order_engine: Arc<OrderEngine>,
+        market_data_service: Arc<dyn MarketDataService>,
+    ) -> Self {
+        debug!("为连接 {} 创建消息分发器（带完整服务）", connection_id);
+        Self { 
+            connection_id,
+            order_engine,
+            market_data_service: Some(market_data_service),
         }
     }
 
@@ -34,6 +53,46 @@ impl MessageDispatcher {
         Self { 
             connection_id,
             order_engine: Arc::new(order_engine),
+            market_data_service: None,
+        }
+    }
+
+    /// 将 MarketData 转换为 protobuf MarketDataSnapshot
+    fn convert_market_data_to_protobuf(&self, market_data: &MarketData) -> MarketDataSnapshot {
+        let static_data = &market_data.static_data;
+        let dynamic_data = &market_data.dynamic_data;
+
+        MarketDataSnapshot {
+            stock_code: static_data.stock_id.to_string(),
+            last_price: dynamic_data.current_price.try_into().unwrap_or(0.0),
+            open_price: static_data.open_price.try_into().unwrap_or(0.0),
+            high_price: dynamic_data.high_price.try_into().unwrap_or(0.0),
+            low_price: if dynamic_data.low_price == Decimal::MAX {
+                0.0 // 如果还没有交易，最低价设为0
+            } else {
+                dynamic_data.low_price.try_into().unwrap_or(0.0)
+            },
+            prev_close_price: static_data.prev_close_price.try_into().unwrap_or(0.0),
+            total_volume: dynamic_data.volume as i64,
+            total_turnover: dynamic_data.turnover.try_into().unwrap_or(0.0),
+            server_timestamp_utc: dynamic_data.last_updated.to_rfc3339(),
+            
+            // 买卖盘数据 - 暂时使用基于当前价格的估算值
+            // 在未来版本中，这些数据会来自订单簿深度
+            bid_price_1: if dynamic_data.current_price > Decimal::ZERO {
+                (dynamic_data.current_price * Decimal::from_str("0.999").unwrap_or(Decimal::ONE))
+                    .try_into().unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            bid_volume_1: 1000, // 模拟买一量
+            ask_price_1: if dynamic_data.current_price > Decimal::ZERO {
+                (dynamic_data.current_price * Decimal::from_str("1.001").unwrap_or(Decimal::ONE))
+                    .try_into().unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            ask_volume_1: 1000, // 模拟卖一量
         }
     }
 
@@ -322,8 +381,82 @@ impl MessageDispatcher {
         info!("连接 {} 处理市场数据请求: action={:?}, symbols={:?}", 
               self.connection_id, req.action, req.stock_codes);
         
-        // TODO: 实现实际的市场数据订阅逻辑
-        // 这里先返回一个模拟的市场数据快照
+        // 检查是否有市场数据服务可用
+        let market_data_service = match &self.market_data_service {
+            Some(service) => service,
+            None => {
+                // 如果没有市场数据服务，返回模拟数据（保持向后兼容）
+                warn!("连接 {} 没有市场数据服务，返回模拟数据", self.connection_id);
+                return self.handle_market_data_request_fallback(req).await;
+            }
+        };
+
+        // 处理订阅/取消订阅请求
+        match req.action {
+            1 => { // Subscribe
+                info!("连接 {} 订阅市场数据", self.connection_id);
+                // 在实际实现中，这里可以管理订阅列表
+                // 目前先返回第一个股票的数据作为响应
+            }
+            2 => { // Unsubscribe
+                info!("连接 {} 取消订阅市场数据", self.connection_id);
+                // 在实际实现中，这里可以从订阅列表中移除
+                return Ok(ProtoBody::MarketDataSnapshot(MarketDataSnapshot {
+                    stock_code: req.stock_codes.first().unwrap_or(&"UNKNOWN".to_string()).clone(),
+                    server_timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                    last_price: 0.0,
+                    bid_price_1: 0.0,
+                    bid_volume_1: 0,
+                    ask_price_1: 0.0,
+                    ask_volume_1: 0,
+                    open_price: 0.0,
+                    high_price: 0.0,
+                    low_price: 0.0,
+                    prev_close_price: 0.0,
+                    total_volume: 0,
+                    total_turnover: 0.0,
+                }));
+            }
+            _ => {
+                warn!("连接 {} 市场数据请求操作未指定", self.connection_id);
+            }
+        }
+        
+        // 获取并返回市场数据
+        if !req.stock_codes.is_empty() {
+            let stock_code = &req.stock_codes[0];
+            
+            match market_data_service.get_market_data(stock_code).await {
+                Some(market_data) => {
+                    info!("连接 {} 成功获取股票 {} 的市场数据", self.connection_id, stock_code);
+                    let proto_snapshot = self.convert_market_data_to_protobuf(&market_data);
+                    Ok(ProtoBody::MarketDataSnapshot(proto_snapshot))
+                }
+                None => {
+                    warn!("连接 {} 未找到股票 {} 的市场数据", self.connection_id, stock_code);
+                    let error_response = ErrorResponse {
+                        error_code: 404,
+                        error_message: format!("未找到股票 {} 的市场数据", stock_code),
+                        original_request_id: "".to_string(),
+                    };
+                    Ok(ProtoBody::ErrorResponse(error_response))
+                }
+            }
+        } else {
+            // 返回错误响应
+            let error_response = ErrorResponse {
+                error_code: 400,
+                error_message: "股票代码列表为空".to_string(),
+                original_request_id: "".to_string(),
+            };
+            Ok(ProtoBody::ErrorResponse(error_response))
+        }
+    }
+
+    /// 处理市场数据请求的回退方法（模拟数据，用于向后兼容）
+    async fn handle_market_data_request_fallback(&self, req: MarketDataRequest) -> Result<ProtoBody, ConnectionError> {
+        info!("连接 {} 使用模拟市场数据", self.connection_id);
+        
         if !req.stock_codes.is_empty() {
             let stock_code = &req.stock_codes[0];
             let response = MarketDataSnapshot {
