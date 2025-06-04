@@ -24,6 +24,7 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 chrono = "0.4"
 async-trait = "0.1.88"
+rand = "0.8.5"  # 用于性能测试的随机数
 
 # 根据 MVP_开发计划_BDD.md, 消息头可能包含消息类型 (uint16)
 # 可能需要一个 crate 来帮助处理字节序 (如网络字节序 BigEndian)

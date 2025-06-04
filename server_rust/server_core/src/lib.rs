@@ -5,6 +5,8 @@ pub mod message_dispatcher;
 pub mod client_connection;
 pub mod server;
 pub mod app;
+pub mod transport;
+pub mod performance;
 
 // Re-export key components
 pub use error::{ConnectionError};
