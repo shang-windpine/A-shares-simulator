@@ -153,16 +153,16 @@ pub enum OrderNotification {
 /// 用于在订单进入撮合前进行验证
 pub trait OrderValidator: Send + Sync {
     /// 验证订单是否有效
-    fn validate_order(&self, order: &Order) -> Result<(), String>;
+    fn validate_order(&self, order: &Order) -> Result<(), anyhow::Error>;
 
     /// 验证价格是否有效
-    fn validate_price(&self, price: Decimal) -> Result<(), String>;
+    fn validate_price(&self, price: Decimal) -> Result<(), anyhow::Error>;
 
     /// 验证数量是否有效
-    fn validate_quantity(&self, quantity: u64) -> Result<(), String>;
+    fn validate_quantity(&self, quantity: u64) -> Result<(), anyhow::Error>;
 
     /// 验证股票代码是否有效
-    fn validate_stock_id(&self, stock_id: &Arc<str>) -> Result<(), String>;
+    fn validate_stock_id(&self, stock_id: &Arc<str>) -> Result<(), anyhow::Error>;
 }
 
 /// 交易信息

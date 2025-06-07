@@ -6,7 +6,6 @@ use market_data_engine::engine::{MarketDataEngine, MarketDataEngineConfig};
 use market_data_engine::data_types::{MarketDataNotification, MarketDataRequest, MarketDataResponse};
 use market_data_engine::database::{MySqlMarketDataRepository, DatabaseConfig};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::{Server, ServerConfig};
 use crate::error::ConnectionError;

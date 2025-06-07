@@ -4,17 +4,17 @@ use bytes::{BytesMut, Buf};
 use trade_protocal_lite::{HEADER_SIZE, ProtocolError, WireMessage};
 use crate::error::ConnectionError;
 
-/// Frame decoder for handling TCP byte streams and extracting complete message frames.
+/// 用于处理TCP字节流并提取完整消息帧的解码器。
 /// 
-/// This decoder manages a TCP connection and internal buffer to handle packet fragmentation
-/// (sticky packets and incomplete packets) that are inherent to TCP streams.
+/// 该解码器管理TCP连接和内部缓冲区，以处理TCP流固有的数据包分片
+/// （粘包和不完整的数据包）。
 #[derive(Debug)]
 pub struct FrameDecoder {
-    /// The underlying TCP stream reader for reading data
+    /// 用于读取数据的底层TCP流读取器
     reader: ReadHalf<TcpStream>,
-    /// Internal buffer to accumulate data from multiple reads
+    /// 用于累积多次读取数据的内部缓冲区
     buffer: BytesMut,
-    /// Maximum allowed message size to prevent memory exhaustion attacks
+    /// 为防止内存耗尽攻击而设置的最大允许消息大小
     max_message_size: usize,
 }
 
@@ -22,52 +22,52 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1MB
 const DEFAULT_BUFFER_SIZE: usize = 8192; // 8KB
 
 impl FrameDecoder {
-    /// Creates a new FrameDecoder with the given TCP stream reader.
+    /// 使用给定的TCP流读取器创建一个新的FrameDecoder。
     /// 
-    /// # Arguments
-    /// * `reader` - The TCP stream reader to read from
-    /// * `max_message_size` - Maximum allowed message size in bytes (default: 1MB)
+    /// # 参数
+    /// * `reader` - 要从中读取的TCP流读取器
+    /// * `max_message_size` - 最大允许消息大小（字节）（默认：1MB）
     pub fn new(reader: ReadHalf<TcpStream>, max_message_size: Option<usize>) -> Self {
         Self {
             reader,
-            buffer: BytesMut::with_capacity(DEFAULT_BUFFER_SIZE), // Start with 8KB buffer
-            max_message_size: max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE), // Default 1MB
+            buffer: BytesMut::with_capacity(DEFAULT_BUFFER_SIZE), // 从8KB缓冲区开始
+            max_message_size: max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE), // 默认1MB
         }
     }
 
-    /// Attempts to read a complete message frame from the TCP stream.
+    /// 尝试从TCP流中读取完整的消息帧。
     /// 
-    /// This method handles the complexity of TCP streaming:
-    /// - Reads data from the TCP stream into an internal buffer
-    /// - Parses message headers to determine complete message boundaries
-    /// - Handles incomplete messages by buffering until complete
-    /// - Returns complete WireMessage instances when available
+    /// 此方法处理TCP流的复杂性：
+    /// - 从TCP流读取数据到内部缓冲区
+    /// - 解析消息头以确定完整消息的边界
+    /// - 通过缓冲处理不完整的消息直到完整
+    /// - 当可用时返回完整的WireMessage实例
     /// 
-    /// # Returns
-    /// - `Ok(Some(WireMessage))` - A complete message was successfully decoded
-    /// - `Ok(None)` - Connection was gracefully closed (EOF)
-    /// - `Err(ConnectionError)` - An error occurred during reading or parsing
+    /// # 返回值
+    /// - `Ok(Some(WireMessage))` - 成功解码完整消息
+    /// - `Ok(None)` - 连接正常关闭（EOF）
+    /// - `Err(ConnectionError)` - 读取或解析过程中发生错误
     pub async fn read_frame(&mut self) -> Result<Option<WireMessage>, ConnectionError> {
         loop {
-            // First, try to parse a complete message from the existing buffer
+            // 首先，尝试从现有缓冲区解析完整消息
             if let Some(wire_message) = self.try_parse_message()? {
                 return Ok(Some(wire_message));
             }
 
-            // If we can't parse a complete message, read more data from the stream
+            // 如果无法解析完整消息，从流中读取更多数据
             let bytes_read = self.reader.read_buf(&mut self.buffer).await?;
             
-            // If read returns 0 bytes, the connection was closed
+            // 如果读取返回0字节，表示连接已关闭
             if bytes_read == 0 {
-                // Check if we have any remaining data in the buffer
+                // 检查缓冲区中是否还有剩余数据
                 if self.buffer.is_empty() {
-                    return Ok(None); // Clean EOF
+                    return Ok(None); // 干净的EOF
                 } else {
                     return Err(ConnectionError::IncompleteMessage);
                 }
             }
 
-            // Check for potential memory exhaustion attack
+            // 检查潜在的内存耗尽攻击
             if self.buffer.len() > self.max_message_size {
                 return Err(ConnectionError::MessageTooLarge {
                     max: self.max_message_size,
@@ -77,31 +77,31 @@ impl FrameDecoder {
         }
     }
 
-    /// Attempts to parse a complete message from the current buffer.
+    /// 尝试从当前缓冲区解析完整消息。
     /// 
-    /// # Returns
-    /// - `Ok(Some(WireMessage))` - Successfully parsed a complete message
-    /// - `Ok(None)` - Buffer doesn't contain a complete message yet
-    /// - `Err(ConnectionError)` - Parsing error occurred
+    /// # 返回值
+    /// - `Ok(Some(WireMessage))` - 成功解析完整消息
+    /// - `Ok(None)` - 缓冲区中还没有完整消息
+    /// - `Err(ConnectionError)` - 解析过程中发生错误
     fn try_parse_message(&mut self) -> Result<Option<WireMessage>, ConnectionError> {
-        // WireMessage needs at least HEADER_SIZE bytes to parse the header
+        // WireMessage至少需要HEADER_SIZE字节来解析头部
         
         // total_length(4) + msg_type(2) + proto_body_length(4)
         if self.buffer.len() < HEADER_SIZE as usize {
-            // Not enough data for a complete header
+            // 没有足够的数据用于完整头部
             return Ok(None);
         }
 
-        // We have at least a header, let's peek at the total_length to see if we have a complete message
+        // 我们至少有头部，让我们查看total_length以确定是否有完整消息
         let total_length = {
             let mut peek_buf = self.buffer.clone();
-            peek_buf.get_u32() // Read total_length without consuming from the real buffer
+            peek_buf.get_u32() // 从真实缓冲区读取total_length而不消耗它
         };
 
-        // Validate total_length
+        // 验证total_length
         if total_length < HEADER_SIZE {
             return Err(ConnectionError::InvalidHeader(
-                format!("Invalid total_length: {} is less than header size {}", total_length, HEADER_SIZE)
+                format!("无效的total_length: {}小于头部大小{}", total_length, HEADER_SIZE)
             ));
         }
 
@@ -112,29 +112,29 @@ impl FrameDecoder {
             });
         }
 
-        // Check if we have the complete message in the buffer
+        // 检查缓冲区中是否有完整消息
         if self.buffer.len() < total_length as usize {
-            // We don't have the complete message yet
+            // 我们还没有完整消息
             return Ok(None);
         }
 
-        // We have a complete message! Extract it from the buffer
+        // 我们有完整消息！从缓冲区中提取它
         let message_bytes = self.buffer.split_to(total_length as usize);
         let message_bytes = message_bytes.freeze();
 
-        // Use WireMessage's decode_from_bytes to parse the complete message
+        // 使用WireMessage的decode_from_bytes解析完整消息
         match WireMessage::decode_from_bytes(message_bytes) {
             Ok(wire_message) => Ok(Some(wire_message)),
             Err(ProtocolError::InsufficientHeaderData { .. }) => {
-                // This should not happen since we already checked the buffer size
+                // 这不应该发生，因为我们已经检查了缓冲区大小
                 Err(ConnectionError::InvalidHeader(
-                    "Internal error: insufficient header data after size check".to_string()
+                    "内部错误：大小检查后头部数据不足".to_string()
                 ))
             }
             Err(ProtocolError::InsufficientBodyData { expected, actual }) => {
-                // This should not happen since we already checked the total length
+                // 这不应该发生，因为我们已经检查了总长度
                 Err(ConnectionError::InvalidHeader(
-                    format!("Internal error: insufficient body data - expected: {}, actual: {}", expected, actual)
+                    format!("内部错误：消息体数据不足 - 期望：{}，实际：{}", expected, actual)
                 ))
             }
             Err(ProtocolError::InvalidMessageType { message_type }) => {
@@ -142,24 +142,24 @@ impl FrameDecoder {
             }
             Err(other_error) => {
                 Err(ConnectionError::Application(
-                    format!("Failed to decode WireMessage: {}", other_error)
+                    format!("解码WireMessage失败：{}", other_error)
                 ))
             }
         }
     }
 
-    /// Returns the current size of the internal buffer.
+    /// 返回内部缓冲区的当前大小。
     pub fn buffer_len(&self) -> usize {
         self.buffer.len()
     }
 
-    /// Returns the capacity of the internal buffer.
+    /// 返回内部缓冲区的容量。
     pub fn buffer_capacity(&self) -> usize {
         self.buffer.capacity()
     }
 
-    /// Consumes the FrameDecoder and returns the underlying ReadHalf.
-    /// This is useful when you need to upgrade the connection or handle it differently.
+    /// 消费FrameDecoder并返回底层的ReadHalf。
+    /// 这在需要升级连接或以不同方式处理连接时很有用。
     pub fn into_reader(self) -> ReadHalf<TcpStream> {
         self.reader
     }
@@ -174,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_frame_decoder_complete_message() {
-        // Create a test message
+        // 创建测试消息
         let login_request = LoginRequest {
             user_id: "test_user".to_string(),
             password: "test_password".to_string(),
@@ -183,37 +183,37 @@ mod tests {
         let wire_msg: WireMessage = trade_msg.try_into().unwrap();
         let wire_msg_bytes = wire_msg.encode_to_bytes();
 
-        // Set up TCP connection for testing
+        // 设置测试用的TCP连接
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Spawn a task to send the test data
+        // 生成任务发送测试数据
         tokio::spawn(async move {
             let mut stream = TcpStream::connect(addr).await.unwrap();
             stream.write_all(&wire_msg_bytes).await.unwrap();
             stream.shutdown().await.unwrap();
         });
 
-        // Accept the connection and test the decoder
+        // 接受连接并测试解码器
         let (stream, _) = listener.accept().await.unwrap();
         let (reader, _writer) = tokio::io::split(stream);
         let mut decoder = FrameDecoder::new(reader, None);
 
-        // Try to read the frame
+        // 尝试读取帧
         let result = decoder.read_frame().await.unwrap();
         assert!(result.is_some());
 
         let received_wire_msg = result.unwrap();
         assert_eq!(received_wire_msg.msg_type, trade_protocal_lite::MessageType::LoginRequest);
 
-        // Try to read again, should return None (EOF)
+        // 再次尝试读取，应该返回None（EOF）
         let result = decoder.read_frame().await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn test_frame_decoder_fragmented_message() {
-        // Create a test message
+        // 创建测试消息
         let login_request = LoginRequest {
             user_id: "test_user_with_long_name".to_string(),
             password: "test_password_with_long_content".to_string(),
@@ -222,7 +222,7 @@ mod tests {
         let wire_msg: WireMessage = trade_msg.try_into().unwrap();
         let wire_msg_bytes = wire_msg.encode_to_bytes();
 
-        // Set up TCP connection for testing
+        // 设置测试用的TCP连接
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 

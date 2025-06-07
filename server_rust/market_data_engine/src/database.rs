@@ -1,6 +1,6 @@
 //! 市场数据数据库操作接口
 
-use std::str::FromStr;
+use std::{borrow::Cow, str::FromStr};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{MySqlPool, Row};
@@ -8,13 +8,12 @@ use tracing::{info, instrument};
 use thiserror::Error;
 
 use crate::data_types::{StaticMarketData, MarketData};
-use core_entities::Timestamp;
 
 /// 数据库配置
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     /// 数据库连接URL
-    pub database_url: String,
+    pub database_url: Cow<'static, str>,
     /// 最大连接数
     pub max_connections: u32,
     /// 连接超时时间（秒）
@@ -24,7 +23,7 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            database_url: "mysql://root:@localhost:3306/a_shares_real_history".to_string(),
+            database_url: Cow::Borrowed("mysql://root:@localhost:3306/a_shares_real_history"),
             max_connections: 10,
             connect_timeout_secs: 30,
         }

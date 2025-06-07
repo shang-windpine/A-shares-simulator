@@ -13,7 +13,69 @@ members = [
 ]
 
 [workspace.dependencies]
-# Common dependencies can be listed here if needed later
+# 异步运行时
+tokio = { version = "1.45.1", features = ["full"] }
+
+# 时间处理
+chrono = { version = "0.4.41", features = ["serde"] }
+
+# 数字精度
+rust_decimal = "1.37.1"
+rust_decimal_macros = "1.37.1"
+
+# 序列化
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+# 错误处理
+anyhow = "1.0.98"
+thiserror = "2.0.12"
+
+# 日志
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+# 网络和字节处理
+bytes = "1.10.1"
+
+# protobuf
+prost = "0.13.5"
+prost-build = "0.13.5"
+
+# 数据库
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "mysql", "chrono", "rust_decimal"] }
+
+# 高并发集合
+dashmap = "6.1.0"
+
+# 集合
+indexmap = "2.9.0"
+
+# 异步trait
+async-trait = "0.1.88"
+
+# UUID生成
+uuid = { version = "1.17.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+
+# 锁
+parking_lot = "0.12.3"
+
+# Redis
+redis = { version = "0.31.0", features = ["tokio-comp"] }
+
+# 随机数
+rand = "0.8.5"
+
+# Workspace内部依赖
+core_entities = { path = "core_entities" }
+trade_protocal_lite = { path = "trade_protocal_lite" }
+order_engine = { path = "order_engine" }
+matching_engine = { path = "matching_engine" }
+market_data_engine = { path = "market_data_engine" }
+account_management = { path = "account_management" }
+market_rules = { path = "market_rules" }
+tick_generator = { path = "tick_generator" }
+server_core = { path = "server_core" }
 
 [profile.release]
 lto = true

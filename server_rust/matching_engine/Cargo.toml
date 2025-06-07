@@ -4,18 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.98"
-async-trait = "0.1.83"
-chrono = { version = "0.4", features = ["serde"] }
-redis = { version = "0.31.0", features = ["tokio-comp"] }
-rust_decimal = "1.37.1"
-rust_decimal_macros = "1.37.1"
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "2.0.12"
-tokio = { version = "1.45.1", features = ["full"] }
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
-uuid = { version = "1.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
-order_engine = { path = "../order_engine" }
-core_entities = { path = "../core_entities" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+redis = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+order_engine = { workspace = true }
+core_entities = { workspace = true }
 # Dependencies like redis might be added here 

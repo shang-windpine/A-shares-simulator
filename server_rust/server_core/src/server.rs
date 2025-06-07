@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -11,13 +12,13 @@ use crate::error::{ConnectionError};
 /// 默认最大连接数
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 /// 默认监听地址
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_LISTEN_ADDR: &'static str = "127.0.0.1:8080";
 
 /// 服务器配置
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// 监听地址
-    pub listen_addr: String,
+    pub listen_addr: Cow<'static, str>,
     /// 最大连接数
     pub max_connections: usize,
 }
@@ -25,7 +26,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            listen_addr: Cow::Borrowed(DEFAULT_LISTEN_ADDR),
             max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
@@ -54,7 +55,7 @@ impl Server {
         info!("创建服务器实例，配置: {:?}", config);
 
         // 绑定TCP监听器
-        let listener = match TcpListener::bind(&config.listen_addr).await {
+        let listener = match TcpListener::bind(&config.listen_addr.as_ref()).await {
             Ok(listener) => {
                 info!("服务器成功绑定到地址: {}", config.listen_addr);
                 listener
@@ -104,7 +105,7 @@ impl Server {
     /// 使用指定地址创建服务器
     pub async fn new_with_addr(addr: &str) -> Result<Self, ConnectionError> {
         let config = ServerConfig {
-            listen_addr: addr.to_string(),
+            listen_addr: Cow::Owned(addr.to_string()),
             ..Default::default()
         };
         Self::new(config).await
@@ -247,7 +248,7 @@ impl Server {
 #[derive(Debug, Clone)]
 pub struct ServerStats {
     /// 监听地址
-    pub listen_addr: String,
+    pub listen_addr: Cow<'static, str>,
     /// 连接统计
     pub connection_stats: ConnectionStats,
 }
@@ -260,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_creation() {
         let config = ServerConfig {
-            listen_addr: "127.0.0.1:0".to_string(), // 使用端口0让系统自动分配
+            listen_addr: Cow::Borrowed("127.0.0.1:0"), // 使用端口0让系统自动分配
             max_connections: 100,
         };
         

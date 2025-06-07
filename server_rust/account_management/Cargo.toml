@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-core_entities = { path = "../core_entities" }
+core_entities = { workspace = true }
 # Dependencies like rust_decimal for precise calculations might be added 

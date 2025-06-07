@@ -1,6 +1,7 @@
 use server_core::{Server, ServerConfig, init_tracing};
 use tokio::signal;
 use tracing::info;
+use std::borrow::Cow;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建服务器配置
     let config = ServerConfig {
-        listen_addr: "127.0.0.1:8080".to_string(),
+        listen_addr: Cow::Borrowed("127.0.0.1:8080"),
         max_connections: 1000, // 设置较小的连接数用于演示
     };
 

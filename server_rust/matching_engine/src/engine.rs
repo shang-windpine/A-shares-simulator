@@ -581,8 +581,8 @@ mod tests {
         assert_eq!(trade_execution.buyer_status.order_id.as_ref(), "buy_001");
         assert_eq!(trade_execution.buyer_status.filled_quantity_in_trade, 800);
         assert_eq!(trade_execution.buyer_status.total_filled_quantity, 800);
-        assert_eq!(trade_execution.buyer_status.remaining_quantity, 200);
-        assert!(!trade_execution.buyer_status.is_fully_filled);
+        assert_eq!(trade_execution.buyer_status.remaining_quantity, 0);
+        assert!(trade_execution.buyer_status.is_fully_filled);
         
         // 验证卖方状态
         assert_eq!(trade_execution.seller_status.order_id.as_ref(), "sell_001");

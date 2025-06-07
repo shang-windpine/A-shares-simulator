@@ -1,4 +1,5 @@
 use thiserror::Error;
+use std::borrow::Cow;
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -45,10 +46,10 @@ pub enum ConnectionError {
     ConnectionNotFound { connection_id: u64 },
 
     #[error("Failed to bind to address {addr}: {source}")]
-    BindError { addr: String, source: std::io::Error },
+    BindError { addr: Cow<'static, str>, source: std::io::Error },
 
     #[error("Invalid address format: {addr}")]
-    InvalidAddress { addr: String },
+    InvalidAddress { addr: Cow<'static, str> },
 
     #[error("Channel send error: {0}")]
     ChannelSend(String),
