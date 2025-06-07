@@ -1,7 +1,6 @@
-use server_core::{Server, ServerConfig, init_tracing};
+use server_core::{Server, AppConfig, init_tracing};
 use tokio::signal;
 use tracing::info;
-use std::borrow::Cow;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,10 +10,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("启动 A股模拟交易服务器");
 
     // 创建服务器配置
-    let config = ServerConfig {
-        listen_addr: Cow::Borrowed("127.0.0.1:8080"),
-        max_connections: 1000, // 设置较小的连接数用于演示
-    };
+    let mut app_config = AppConfig::default();
+    app_config.server.listen_addr = "127.0.0.1:8080".into();
+    app_config.server.max_connections = 1000; // 设置较小的连接数用于演示
+    let config = app_config.server;
 
     // 创建服务器实例
     let mut server = Server::new(config).await?;

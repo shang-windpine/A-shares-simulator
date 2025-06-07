@@ -7,6 +7,7 @@ pub mod server;
 pub mod app;
 pub mod transport;
 pub mod performance;
+pub mod config;
 
 // Re-export key components
 pub use error::{ConnectionError};
@@ -14,7 +15,8 @@ pub use frame_decoder::FrameDecoder;
 pub use connection_manager::{ConnectionManager, ConnectionStats};
 pub use message_dispatcher::MessageDispatcher;
 pub use client_connection::{ClientConnection, ConnectionInfo};
-pub use server::{Server, ServerConfig, ServerStats};
+pub use server::{Server, ServerStats};
+pub use config::ServerConfig;
 pub use connection_manager::ConnectionId;
 pub use app::{App, AppConfig, AppServices};
 
@@ -38,7 +40,8 @@ mod tests {
         let _: Option<ServerConfig> = None;
         
         // 测试创建配置
-        let config = ServerConfig::default();
+        let app_config = AppConfig::default();
+        let config = app_config.server;
         assert!(!config.listen_addr.is_empty());
         assert!(config.max_connections > 0);
     }

@@ -8,29 +8,12 @@ use order_engine::OrderEngine;
 
 use crate::connection_manager::{ConnectionManager, ConnectionManagement, ConnectionStats};
 use crate::error::{ConnectionError};
+use crate::config::ServerConfig;
 
 /// 默认最大连接数
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 /// 默认监听地址
 const DEFAULT_LISTEN_ADDR: &'static str = "127.0.0.1:8080";
-
-/// 服务器配置
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    /// 监听地址
-    pub listen_addr: Cow<'static, str>,
-    /// 最大连接数
-    pub max_connections: usize,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            listen_addr: Cow::Borrowed(DEFAULT_LISTEN_ADDR),
-            max_connections: DEFAULT_MAX_CONNECTIONS,
-        }
-    }
-}
 
 /// 服务器主组件，管理整个服务器的生命周期
 pub struct Server {
@@ -55,7 +38,7 @@ impl Server {
         info!("创建服务器实例，配置: {:?}", config);
 
         // 绑定TCP监听器
-        let listener = match TcpListener::bind(&config.listen_addr.as_ref()).await {
+        let listener = match TcpListener::bind(config.listen_addr.as_ref()).await {
             Ok(listener) => {
                 info!("服务器成功绑定到地址: {}", config.listen_addr);
                 listener
@@ -63,7 +46,7 @@ impl Server {
             Err(e) => {
                 error!("绑定地址失败: {} - {}", config.listen_addr, e);
                 return Err(ConnectionError::BindError {
-                    addr: config.listen_addr.clone(),
+                    addr: Cow::Owned(config.listen_addr.to_string()),
                     source: e,
                 });
             }
@@ -99,16 +82,17 @@ impl Server {
 
     /// 使用默认配置创建服务器
     pub async fn new_with_defaults() -> Result<Self, ConnectionError> {
-        Self::new(ServerConfig::default()).await
+        use crate::config::AppConfig;
+        let app_config = AppConfig::default();
+        Self::new(app_config.server).await
     }
 
     /// 使用指定地址创建服务器
     pub async fn new_with_addr(addr: &str) -> Result<Self, ConnectionError> {
-        let config = ServerConfig {
-            listen_addr: Cow::Owned(addr.to_string()),
-            ..Default::default()
-        };
-        Self::new(config).await
+        use crate::config::AppConfig;
+        let mut app_config = AppConfig::default();
+        app_config.server.listen_addr = addr.into();
+        Self::new(app_config.server).await
     }
 
     /// 主服务循环
@@ -228,7 +212,7 @@ impl Server {
         let connection_stats = manager.get_stats();
         
         ServerStats {
-            listen_addr: self.config.listen_addr.clone(),
+            listen_addr: Cow::Owned(self.config.listen_addr.to_string()),
             connection_stats,
         }
     }
@@ -260,12 +244,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_creation() {
-        let config = ServerConfig {
-            listen_addr: Cow::Borrowed("127.0.0.1:0"), // 使用端口0让系统自动分配
-            max_connections: 100,
-        };
+        use crate::config::AppConfig;
+        let mut app_config = AppConfig::default();
+        app_config.server.listen_addr = "127.0.0.1:0".into(); // 使用端口0让系统自动分配
+        app_config.server.max_connections = 100;
         
-        let server = Server::new(config).await;
+        let server = Server::new(app_config.server).await;
         assert!(server.is_ok());
         
         let server = server.unwrap();

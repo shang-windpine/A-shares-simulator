@@ -1,0 +1,27 @@
+server:
+  listen_addr: 127.0.0.1:8080
+  max_connections: 10000
+  max_message_size: 1048576
+  buffer_size: 8192
+  heartbeat_timeout_secs: 30
+order_engine:
+  order_notification_buffer_size: 10000
+  match_notification_buffer_size: 10000
+  enable_validation: true
+  cleanup_interval_seconds: 3600
+  retain_completed_orders_hours: 24
+market_data_engine:
+  trade_date: 2024-09-23
+  auto_load_all_market_data: true
+  notification_buffer_size: 1000
+  request_buffer_size: 100
+database:
+  database_url: mysql://root:@localhost:3306/a_shares_real_history
+  max_connections: 10
+  connect_timeout_secs: 30
+logging:
+  level: info
+  console: true
+  file: false
+  file_path: logs/app.log
+  json_format: false
