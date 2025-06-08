@@ -11,11 +11,6 @@ use market_data_engine::MarketDataService;
 use crate::connection_manager::{ConnectionManager, ConnectionManagement, ConnectionStats};
 use crate::error::{ConnectionError};
 
-/// 默认最大连接数
-const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
-/// 默认监听地址
-const DEFAULT_LISTEN_ADDR: &'static str = "127.0.0.1:8080";
-
 /// 服务器主组件，管理整个服务器的生命周期
 pub struct Server {
     /// TCP监听器
@@ -223,5 +218,5 @@ mod tests {
     use tokio::time::{sleep, Duration};
     use core_entities::app_config::*;
 
-    
+
 } 

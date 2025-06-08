@@ -192,12 +192,12 @@ impl From<MessageType> for u16 {
 /// Application-layer message structure that provides type safety and ease of use.
 /// This is the primary structure used by application code.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TradeMessage {
+pub struct ProtoMessage {
     /// The protobuf message body wrapped in a type-safe enum.
     pub body: ProtoBody,
 }
 
-impl TradeMessage {
+impl ProtoMessage {
     /// Creates a new TradeMessage with the given protobuf body.
     pub fn new(body: ProtoBody) -> Self {
         Self { body }
@@ -250,7 +250,7 @@ impl TradeMessage {
     /// Decodes a TradeMessage from bytes and message type.
     pub fn decode_from_bytes(msg_type: MessageType, data: Bytes) -> ProtocolResult<Self> {
         let body = ProtoBody::decode_from_bytes(msg_type, data)?;
-        Ok(TradeMessage::new(body))
+        Ok(ProtoMessage::new(body))
     }
 }
 
@@ -330,10 +330,10 @@ impl WireMessage {
 }
 
 // Conversion between TradeMessage and WireMessage
-impl TryFrom<TradeMessage> for WireMessage {
+impl TryFrom<ProtoMessage> for WireMessage {
     type Error = ProtocolError;
 
-    fn try_from(trade_msg: TradeMessage) -> Result<Self, Self::Error> {
+    fn try_from(trade_msg: ProtoMessage) -> Result<Self, Self::Error> {
         let msg_type = trade_msg.message_type();
         let proto_body = trade_msg.body.encode_to_bytes()?;
         
@@ -341,12 +341,12 @@ impl TryFrom<TradeMessage> for WireMessage {
     }
 }
 
-impl TryFrom<WireMessage> for TradeMessage {
+impl TryFrom<WireMessage> for ProtoMessage {
     type Error = ProtocolError;
 
     fn try_from(wire_msg: WireMessage) -> Result<Self, Self::Error> {
         let body = ProtoBody::decode_from_bytes(wire_msg.msg_type, wire_msg.proto_body)?;
-        Ok(TradeMessage::new(body))
+        Ok(ProtoMessage::new(body))
     }
 }
 
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_login_request_encoding_decoding() {
         // Create a login request message
-        let original_msg = TradeMessage::new_login_request(
+        let original_msg = ProtoMessage::new_login_request(
             "test_user".to_string(),
             "test_password".to_string()
         );
@@ -368,7 +368,7 @@ mod tests {
 
         // Decode back to WireMessage then TradeMessage
         let decoded_wire_msg = WireMessage::decode_from_bytes(wire_bytes).unwrap();
-        let decoded_msg: TradeMessage = decoded_wire_msg.try_into().unwrap();
+        let decoded_msg: ProtoMessage = decoded_wire_msg.try_into().unwrap();
 
         // Verify the roundtrip
         assert_eq!(original_msg, decoded_msg);
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_heartbeat_message() {
         let timestamp = "2024-01-01T12:00:00Z".to_string();
-        let heartbeat_msg = TradeMessage::new_heartbeat(timestamp.clone());
+        let heartbeat_msg = ProtoMessage::new_heartbeat(timestamp.clone());
 
         // Convert to WireMessage for transmission
         let wire_msg: WireMessage = heartbeat_msg.clone().try_into().unwrap();
@@ -386,7 +386,7 @@ mod tests {
         
         // Decode back to TradeMessage
         let decoded_wire_msg = WireMessage::decode_from_bytes(wire_bytes).unwrap();
-        let decoded_msg: TradeMessage = decoded_wire_msg.try_into().unwrap();
+        let decoded_msg: ProtoMessage = decoded_wire_msg.try_into().unwrap();
 
         assert_eq!(heartbeat_msg, decoded_msg);
         assert_eq!(decoded_msg.message_type(), MessageType::Heartbeat);
@@ -401,14 +401,14 @@ mod tests {
 
     #[test]
     fn test_wire_message_conversion() {
-        let trade_msg = TradeMessage::new_login_request(
+        let trade_msg = ProtoMessage::new_login_request(
             "user".to_string(),
             "pass".to_string()
         );
 
         // Convert to wire message and back
         let wire_msg: WireMessage = trade_msg.clone().try_into().unwrap();
-        let converted_back: TradeMessage = wire_msg.try_into().unwrap();
+        let converted_back: ProtoMessage = wire_msg.try_into().unwrap();
 
         assert_eq!(trade_msg, converted_back);
     }

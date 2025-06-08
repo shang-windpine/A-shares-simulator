@@ -9,11 +9,10 @@ use tracing::{error, info, warn, instrument};
 use dashmap::DashMap;
 
 use crate::data_types::{
-    MarketData, StaticMarketData, DynamicMarketData, 
-    MarketDataNotification, MarketDataRequest, MarketDataResponse
+    MarketData, MarketDataNotification, MarketDataRequest, MarketDataResponse
 };
 use crate::database::{MarketDataRepository, DatabaseError};
-use core_entities::{MatchNotification, TradeExecution, Trade, Timestamp, OrderStatusInTrade};
+use core_entities::{MatchNotification, TradeExecution};
 use crate::service::MarketDataService;
 
 /// 市场行情引擎配置
@@ -575,7 +574,8 @@ mod tests {
     use crate::data_types::StaticMarketData;
     use rust_decimal_macros::dec;
     use chrono::NaiveDate;
-    use std::sync::Arc;
+    use chrono::Utc;
+    use core_entities::{Trade, OrderStatusInTrade};
 
     // 模拟数据存储实现
     #[derive(Clone)]

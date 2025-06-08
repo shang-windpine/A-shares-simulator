@@ -1,7 +1,7 @@
 //! 市场行情数据类型定义
 
 use std::sync::Arc;
-use chrono::{DateTime, Utc, NaiveDate};
+use chrono::{Utc, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use core_entities::Timestamp;

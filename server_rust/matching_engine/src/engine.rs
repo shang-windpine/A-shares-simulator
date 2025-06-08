@@ -20,7 +20,7 @@ use tracing::{error, info, instrument, warn};
 // 使用 core_entities 中的共享类型
 use core_entities::{
     MatchNotification, Trade, TradeExecution, OrderStatusInTrade,
-    Order, OrderSide, OrderType, OrderStatus, OrderNotification, StockSpecificNotification
+    Order, OrderSide, OrderNotification, StockSpecificNotification
 };
 
 // 每个股票的订单簿
@@ -294,7 +294,7 @@ impl MatchingEngine {
         info!("Starting matching engine");
 
         // 取出接收器用于主任务
-        let mut order_notifier_rx = self.order_notifier_rx.take()
+        let order_notifier_rx = self.order_notifier_rx.take()
             .ok_or("Order notifier receiver already taken")?;
 
         let match_result_tx = Arc::clone(&self.match_result_tx);
@@ -482,6 +482,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::time::Duration;
     use tokio::time::timeout;
+    use core_entities::{OrderType, OrderStatus};
 
     // 辅助函数：创建测试订单
     fn create_test_order(

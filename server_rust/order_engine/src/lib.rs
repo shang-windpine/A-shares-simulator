@@ -1,10 +1,12 @@
 // 导出模块
 pub mod order_pool;
 pub mod engine;
+pub mod service;
 
 // 重新导出核心类型
 pub use order_pool::{OrderPool, OrderPoolStats};
 pub use engine::{OrderEngine, OrderEngineFactory};
+pub use service::OrderEngineService;
 
 // 从 core_entities 重新导出共享类型
 pub use core_entities::{

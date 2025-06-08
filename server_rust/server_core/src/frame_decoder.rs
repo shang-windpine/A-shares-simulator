@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::io::AsyncWriteExt;
-    use trade_protocal_lite::{TradeMessage, ProtoBody, LoginRequest};
+    use trade_protocal_lite::{ProtoMessage, ProtoBody, LoginRequest};
 
     #[tokio::test]
     async fn test_frame_decoder_complete_message() {
@@ -179,7 +179,7 @@ mod tests {
             user_id: "test_user".to_string(),
             password: "test_password".to_string(),
         };
-        let trade_msg = TradeMessage::new(ProtoBody::LoginRequest(login_request));
+        let trade_msg = ProtoMessage::new(ProtoBody::LoginRequest(login_request));
         let wire_msg: WireMessage = trade_msg.try_into().unwrap();
         let wire_msg_bytes = wire_msg.encode_to_bytes();
 
@@ -218,7 +218,7 @@ mod tests {
             user_id: "test_user_with_long_name".to_string(),
             password: "test_password_with_long_content".to_string(),
         };
-        let trade_msg = TradeMessage::new(ProtoBody::LoginRequest(login_request));
+        let trade_msg = ProtoMessage::new(ProtoBody::LoginRequest(login_request));
         let wire_msg: WireMessage = trade_msg.try_into().unwrap();
         let wire_msg_bytes = wire_msg.encode_to_bytes();
 
@@ -261,7 +261,7 @@ mod tests {
             user_id: "test_user".to_string(),
             password: "test_password".to_string(),
         };
-        let trade_msg = TradeMessage::new(ProtoBody::LoginRequest(login_request));
+        let trade_msg = ProtoMessage::new(ProtoBody::LoginRequest(login_request));
         let wire_msg: WireMessage = trade_msg.try_into().unwrap();
         let wire_msg_bytes = wire_msg.encode_to_bytes();
 

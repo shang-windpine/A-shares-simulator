@@ -4,7 +4,7 @@ use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn, instrument};
-use trade_protocal_lite::{TradeMessage, WireMessage};
+use trade_protocal_lite::{ProtoMessage, WireMessage};
 use order_engine::OrderEngine;
 use market_data_engine::MarketDataService;
 
@@ -216,8 +216,8 @@ impl ClientConnection {
     async fn handle_wire_message(&mut self, wire_msg: WireMessage) -> Result<(), ConnectionError> {
         debug!("连接 {} 处理Wire消息: type={:?}", self.id, wire_msg.msg_type);
 
-        // 将WireMessage转换为TradeMessage
-        let trade_msg: TradeMessage = wire_msg.try_into()?;
+        // 将WireMessage转换为ProtoMessage
+        let trade_msg: ProtoMessage = wire_msg.try_into()?;
 
         // 检查是否为心跳消息，如果是则更新心跳时间
         if matches!(trade_msg.body, trade_protocal_lite::ProtoBody::Heartbeat(_)) {
@@ -238,10 +238,10 @@ impl ClientConnection {
 
     /// 发送响应消息给客户端
     #[instrument(level = "debug", skip(self, response))]
-    async fn send_response(&mut self, response: TradeMessage) -> Result<(), ConnectionError> {
+    async fn send_response(&mut self, response: ProtoMessage) -> Result<(), ConnectionError> {
         debug!("连接 {} 发送响应: type={:?}", self.id, response.message_type());
 
-        // 将TradeMessage转换为WireMessage
+        // 将ProtoMessage转换为WireMessage
         let wire_msg: WireMessage = response.try_into()?;
         
         // 编码为字节并发送

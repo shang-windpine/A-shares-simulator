@@ -13,4 +13,5 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
+async-trait = { workspace = true }
 core_entities = { workspace = true }

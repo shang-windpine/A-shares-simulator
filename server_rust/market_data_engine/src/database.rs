@@ -1,6 +1,6 @@
 //! 市场数据数据库操作接口
 
-use std::{borrow::Cow, str::FromStr};
+use std::{borrow::Cow};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{MySqlPool, Row};

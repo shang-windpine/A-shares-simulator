@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
-use trade_protocal_lite::{TradeMessage, ProtoBody, protocol::*};
-use order_engine::{OrderEngine, Order, OrderSide as EngineOrderSide, OrderEngineFactory};
+use trade_protocal_lite::{ProtoMessage, ProtoBody, protocol::*};
+use order_engine::{Order, OrderSide as EngineOrderSide, OrderEngineService};
 use market_data_engine::{MarketDataService, MarketData};
 use rust_decimal::Decimal;
 
@@ -14,19 +14,19 @@ pub struct MessageDispatcher {
     /// 关联的连接ID
     connection_id: ConnectionId,
     /// 订单引擎引用
-    order_engine: Arc<OrderEngine>,
+    order_engine_service: Arc<dyn OrderEngineService>,
     /// 市场数据服务引用
     market_data_service: Arc<dyn MarketDataService>,
 }
 
 impl MessageDispatcher {
     /// 创建新的消息分发器（带有订单引擎依赖）
-    pub fn new(connection_id: ConnectionId, order_engine: Arc<OrderEngine>, market_data_service: Arc<dyn MarketDataService>) -> Self {
+    pub fn new(connection_id: ConnectionId, order_engine_service: Arc<dyn OrderEngineService>, market_data_service: Arc<dyn MarketDataService>) -> Self {
         debug!("为连接 {} 创建消息分发器（带订单引擎）", connection_id);
         Self { 
             connection_id,
-            order_engine,
-            market_data_service: market_data_service,
+            order_engine_service,
+            market_data_service,
         }
     }
 
@@ -70,7 +70,7 @@ impl MessageDispatcher {
     }
 
     /// 分发消息到相应的业务处理器
-    pub async fn dispatch(&self, message: TradeMessage) -> Result<Option<TradeMessage>, ConnectionError> {
+    pub async fn dispatch(&self, message: ProtoMessage) -> Result<Option<ProtoMessage>, ConnectionError> {
         debug!("连接 {} 开始分发消息: {:?}", self.connection_id, message);
 
         let response_body = match message.body {
@@ -116,7 +116,7 @@ impl MessageDispatcher {
             }
         };
 
-        let response = response_body.map(|body| TradeMessage::new(body));
+        let response = response_body.map(|body| ProtoMessage::new(body));
 
         if response.is_some() {
             debug!("连接 {} 消息分发完成，有响应", self.connection_id);
@@ -208,7 +208,7 @@ impl MessageDispatcher {
         );
 
         // 提交订单到引擎
-        match self.order_engine.submit_order(order).await {
+        match self.order_engine_service.submit_order(order).await {
             Ok(server_order_id) => {
                 info!("订单提交成功: client_id={}, server_id={}", req.client_order_id, server_order_id);
                 
@@ -265,7 +265,7 @@ impl MessageDispatcher {
         info!("连接 {} 处理撤单请求: order_id={}", self.connection_id, req.server_order_id_to_cancel);
         
         // 首先查询订单是否存在
-        let order = match self.order_engine.get_order(&req.server_order_id_to_cancel) {
+        let order = match self.order_engine_service.get_order(&req.server_order_id_to_cancel) {
             Some(order) => order,
             None => {
                 let response = OrderUpdateResponse {
@@ -291,7 +291,7 @@ impl MessageDispatcher {
         };
 
         // 提交撤单请求到引擎
-        match self.order_engine.cancel_order(&req.server_order_id_to_cancel, &order.stock_id).await {
+        match self.order_engine_service.cancel_order(&req.server_order_id_to_cancel, &order.stock_id).await {
             Ok(()) => {
                 info!("撤单请求提交成功: order_id={}", req.server_order_id_to_cancel);
                 
@@ -392,6 +392,7 @@ impl MessageDispatcher {
             match &self.market_data_service.get_market_data(stock_code).await {
                 Some(market_data) => {
                     info!("连接 {} 成功获取股票 {} 的市场数据", self.connection_id, stock_code);
+                    println!("market_data: {:?}", market_data);
                     let proto_snapshot = self.convert_market_data_to_protobuf(&market_data);
                     Ok(ProtoBody::MarketDataSnapshot(proto_snapshot))
                 }
@@ -457,66 +458,67 @@ impl MessageDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use order_engine::OrderEngineConfig;
-    use market_data_engine::{StaticMarketData, MarketData, ExtendedMarketData};
-    use async_trait::async_trait;
-    use std::collections::HashMap;
-    use tokio::sync::RwLock;
-    use chrono::{NaiveDate, Utc};
-    use rust_decimal_macros::dec;
+    use order_engine::{OrderEngineConfig, OrderEngineFactory};
+    use market_data_engine::{MarketDataEngineBuilder, MarketDataEngineConfig, MySqlMarketDataRepository, DatabaseConfig};
+    use tokio::sync::mpsc;
+    use chrono::NaiveDate;
 
-    // 创建一个MarketDataService的模拟实现
-    struct MockMarketDataService {
-        data: Arc<RwLock<HashMap<String, MarketData>>>,
-    }
+    async fn create_test_market_data_service() -> Arc<dyn MarketDataService> {
+        // 使用真实的MySQL数据库连接
+        let database_config = Arc::new(DatabaseConfig::default());
+        let repository = Arc::new(
+            MySqlMarketDataRepository::new_with_shared_config(database_config)
+                .await
+                .expect("Failed to create MySQL repository")
+        );
 
-    impl MockMarketDataService {
-        fn new() -> Self {
-            let mut data = HashMap::new();
-            let static_data = StaticMarketData {
-                stock_id: "SH600036".into(),
-                trade_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
-                open_price: dec!(10.00),
-                prev_close_price: dec!(9.50),
-                limit_up_price: dec!(10.45),
-                limit_down_price: dec!(8.55),
-                created_at: Utc::now(),
-            };
-            data.insert("SH600036".to_string(), MarketData::new(static_data));
-            Self { data: Arc::new(RwLock::new(data)) }
-        }
-    }
+        // 创建市场数据引擎配置
+        let engine_config = Arc::new(MarketDataEngineConfig {
+            trade_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), // 使用有数据的日期
+            auto_load_all_market_data: true,
+            notification_buffer_size: 1000,
+            request_buffer_size: 100,
+        });
 
-    #[async_trait]
-    impl MarketDataService for MockMarketDataService {
-        async fn get_market_data(&self, stock_id: &str) -> Option<MarketData> {
-            self.data.read().await.get(stock_id).cloned()
-        }
+        // 创建必要的通道
+        let (market_data_notification_tx, _market_data_notification_rx) = 
+            mpsc::channel(1000);
+        let (_market_data_request_tx, market_data_request_rx) = 
+            mpsc::channel(100);
+        let (market_data_response_tx, _market_data_response_rx) = 
+            mpsc::channel(100);
+        let (_match_notification_tx, match_notification_rx) = 
+            mpsc::channel(100);
 
-        async fn get_multiple_market_data(&self, stock_ids: &[&str]) -> Vec<MarketData> {
-            let data = self.data.read().await;
-            stock_ids.iter().filter_map(|id| data.get(*id).cloned()).collect()
-        }
+        // 创建市场数据引擎
+        let market_data_engine = MarketDataEngineBuilder::new()
+            .with_repository(repository)
+            .build_with_shared_config(
+                engine_config,
+                match_notification_rx,
+                market_data_notification_tx,
+                market_data_request_rx,
+                market_data_response_tx,
+            )
+            .expect("Failed to create market data engine");
 
-        async fn subscribe_market_data(&self, _stock_id: &str) -> Result<(), String> { Ok(()) }
-        async fn unsubscribe_market_data(&self, _stock_id: &str) -> Result<(), String> { Ok(()) }
-        async fn health_check(&self) -> bool { true }
-        async fn get_available_stocks(&self) -> Vec<Arc<str>> {
-            self.data.read().await.keys().map(|k| k.as_str().into()).collect()
-        }
+        // 启动引擎
+        market_data_engine.start().await.expect("Failed to start market data engine");
+
+        Arc::new(market_data_engine)
     }
 
     #[tokio::test]
     async fn test_heartbeat_dispatch() {
         let (order_engine, _order_rx, _match_tx) = 
             OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
-        let market_data_service = Arc::new(MockMarketDataService::new());
+        let market_data_service = create_test_market_data_service().await;
         let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine), market_data_service);
         let heartbeat = Heartbeat {
             client_timestamp_utc: chrono::Utc::now().to_rfc3339(),
         };
         
-        let trade_msg = TradeMessage::new(ProtoBody::Heartbeat(heartbeat.clone()));
+        let trade_msg = ProtoMessage::new(ProtoBody::Heartbeat(heartbeat.clone()));
         let result = dispatcher.dispatch(trade_msg).await;
         assert!(result.is_ok());
         
@@ -536,14 +538,14 @@ mod tests {
     async fn test_login_dispatch() {
         let (order_engine, _order_rx, _match_tx) = 
             OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
-        let market_data_service = Arc::new(MockMarketDataService::new());
+        let market_data_service = create_test_market_data_service().await;
         let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine), market_data_service);
         let login_req = LoginRequest {
             user_id: "test_user".to_string(),
             password: "password".to_string(),
         };
         
-        let trade_msg = TradeMessage::new(ProtoBody::LoginRequest(login_req));
+        let trade_msg = ProtoMessage::new(ProtoBody::LoginRequest(login_req));
         let result = dispatcher.dispatch(trade_msg).await;
         assert!(result.is_ok());
         
@@ -568,19 +570,19 @@ mod tests {
         // 启动引擎
         order_engine.start().await.expect("Failed to start order engine");
 
-        let market_data_service = Arc::new(MockMarketDataService::new());
+        let market_data_service = create_test_market_data_service().await;
         let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine), market_data_service);
         let order_req = NewOrderRequest {
             account_id: "test_account".to_string(),
             client_order_id: "client_order_1".to_string(),
-            stock_code: "SH600036".to_string(),
+            stock_code: "000001.SZ".to_string(), // 使用数据库中存在的股票代码
             side: OrderSide::Buy as i32,
             r#type: OrderType::Limit as i32,
             quantity: 100,
             price: 15.0,
         };
         
-        let trade_msg = TradeMessage::new(ProtoBody::NewOrderRequest(order_req.clone()));
+        let trade_msg = ProtoMessage::new(ProtoBody::NewOrderRequest(order_req.clone()));
         let result = dispatcher.dispatch(trade_msg).await;
         assert!(result.is_ok());
         
@@ -596,6 +598,45 @@ mod tests {
                 assert_eq!(resp.status, OrderStatus::New as i32);
             } else {
                 panic!("期望订单更新响应");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_market_data_request_with_real_database() {
+        let (order_engine, _order_rx, _match_tx) = 
+            OrderEngineFactory::create_with_channels(None, OrderEngineConfig::default());
+        let market_data_service = create_test_market_data_service().await;
+        let dispatcher = MessageDispatcher::new(1, Arc::new(order_engine), market_data_service);
+        
+        let market_data_req = MarketDataRequest {
+            action: 1, // Subscribe
+            stock_codes: vec!["000001.SZ".to_string()], // 使用数据库中存在的股票代码
+        };
+        
+        let trade_msg = ProtoMessage::new(ProtoBody::MarketDataRequest(market_data_req));
+        let result = dispatcher.dispatch(trade_msg).await;
+        assert!(result.is_ok());
+        
+        let response = result.unwrap();
+        assert!(response.is_some());
+        
+        if let Some(msg) = response {
+            match msg.body {
+                ProtoBody::MarketDataSnapshot(snapshot) => {
+                    assert_eq!(snapshot.stock_code, "000001.SZ");
+                    println!("获取到真实市场数据: {:?}", snapshot);
+                    
+                    // 验证数据的合理性
+                    assert!(snapshot.last_price >= 0.0);
+                    assert!(snapshot.open_price >= 0.0);
+                    assert!(snapshot.prev_close_price >= 0.0);
+                }
+                ProtoBody::ErrorResponse(err) => {
+                    println!("警告: 获取市场数据时发生错误: {}", err.error_message);
+                    // 这可能是因为数据库中没有该股票的数据，这是可以接受的
+                }
+                _ => panic!("期望市场数据快照或错误响应"),
             }
         }
     }

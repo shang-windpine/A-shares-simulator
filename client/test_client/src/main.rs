@@ -1,5 +1,5 @@
 use trade_protocal_lite::{
-    TradeMessage, ProtoBody, LoginRequest, LoginResponse, NewOrderRequest, 
+    ProtoMessage, ProtoBody, LoginRequest, LoginResponse, NewOrderRequest, 
     CancelOrderRequest, MarketDataRequest, MarketDataSnapshot, Heartbeat, 
     HeartbeatResponse, WireMessage, OrderSide, OrderType, ErrorResponse,
     market_data_request::SubscriptionAction
@@ -99,7 +99,7 @@ impl TestClient {
             password: "test_password".to_string(),
         };
         
-        let request_msg = TradeMessage::new(ProtoBody::LoginRequest(login_request));
+        let request_msg = ProtoMessage::new(ProtoBody::LoginRequest(login_request));
         self.send_message(request_msg).await?;
         
         // 等待登录响应
@@ -139,7 +139,7 @@ impl TestClient {
                     client_timestamp_utc: Utc::now().to_rfc3339(),
                 };
                 
-                let heartbeat_msg = TradeMessage::new(ProtoBody::Heartbeat(heartbeat));
+                let heartbeat_msg = ProtoMessage::new(ProtoBody::Heartbeat(heartbeat));
                 
                 if let Err(e) = Self::send_message_static(&stream, heartbeat_msg).await {
                     error!("发送心跳失败: {}", e);
@@ -160,7 +160,7 @@ impl TestClient {
             stock_codes: vec!["000001.SZ".to_string()],
         };
         
-        let request_msg = TradeMessage::new(ProtoBody::MarketDataRequest(market_request));
+        let request_msg = ProtoMessage::new(ProtoBody::MarketDataRequest(market_request));
         self.send_message(request_msg).await?;
         
         // 等待行情响应
@@ -212,11 +212,16 @@ impl TestClient {
         info!("提交买单: 股票={}, 数量={}, 价格={:.2}", 
               new_order.stock_code, new_order.quantity, new_order.price);
         
-        let request_msg = TradeMessage::new(ProtoBody::NewOrderRequest(new_order));
+        let request_msg = ProtoMessage::new(ProtoBody::NewOrderRequest(new_order));
         self.send_message(request_msg).await?;
         
         // 等待订单响应
         let response = self.receive_message().await?;
+
+        // ############ DEBUGGING LOG ############
+        info!("在 cancel_order 中收到的响应: {:?}", response);
+        // ############ END DEBUGGING LOG ############
+        
         match response.body {
             ProtoBody::OrderUpdateResponse(order_resp) => {
                 info!("订单提交成功: 服务器订单ID={}, 状态={:?}", 
@@ -241,7 +246,7 @@ impl TestClient {
             server_order_id_to_cancel: server_order_id.to_string(),
         };
         
-        let request_msg = TradeMessage::new(ProtoBody::CancelOrderRequest(cancel_request));
+        let request_msg = ProtoMessage::new(ProtoBody::CancelOrderRequest(cancel_request));
         self.send_message(request_msg).await?;
         
         // 等待撤单响应
@@ -263,12 +268,12 @@ impl TestClient {
     }
 
     /// 发送消息
-    async fn send_message(&self, message: TradeMessage) -> Result<()> {
+    async fn send_message(&self, message: ProtoMessage) -> Result<()> {
         Self::send_message_static(&self.stream, message).await
     }
 
     /// 静态方法：发送消息（用于心跳任务）
-    async fn send_message_static(stream: &Arc<Mutex<TcpStream>>, message: TradeMessage) -> Result<()> {
+    async fn send_message_static(stream: &Arc<Mutex<TcpStream>>, message: ProtoMessage) -> Result<()> {
         let wire_message: WireMessage = message.try_into()?;
         let encoded = wire_message.encode_to_bytes();
         
@@ -280,16 +285,25 @@ impl TestClient {
     }
 
     /// 接收消息
-    async fn receive_message(&self) -> Result<TradeMessage> {
+    async fn receive_message(&self) -> Result<ProtoMessage> {
         let timeout_duration = Duration::from_secs(self.config.message_timeout_secs);
         
         timeout(timeout_duration, async {
-            self.receive_message_internal().await
-        }).await.map_err(|_| anyhow!("接收消息超时"))?
+            loop {
+                let message = self.receive_message_internal().await?;
+                // 检查是否为心跳响应
+                if let ProtoBody::HeartbeatResponse(_) = &message.body {
+                    debug!("收到并忽略心跳响应，继续等待业务响应");
+                    continue; // 忽略并继续循环
+                }
+                // 如果不是心跳响应，则认为是期望的业务响应
+                return Ok(message);
+            }
+        }).await.map_err(|_| anyhow!("接收业务消息超时"))?
     }
 
     /// 内部接收消息逻辑
-    async fn receive_message_internal(&self) -> Result<TradeMessage> {
+    async fn receive_message_internal(&self) -> Result<ProtoMessage> {
         let mut stream_guard = self.stream.lock().await;
         
         // 读取消息头部 (10字节)
@@ -319,7 +333,7 @@ impl TestClient {
             proto_body: Bytes::from(body_buf),
         };
         
-        let trade_message: TradeMessage = wire_message.try_into()?;
+        let trade_message: ProtoMessage = wire_message.try_into()?;
         Ok(trade_message)
     }
 }

@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use core_entities::app_config::OrderEngineConfig;
+use crate::service::OrderEngineService;
 
 // 使用core_entities中的MatchNotification
 use core_entities::MatchNotification;
@@ -81,7 +82,7 @@ impl OrderEngine {
         info!("Starting order engine...");
 
         // 取出接收器用于主任务
-        let mut match_notification_rx = inner.match_notification_rx.take()
+        let match_notification_rx = inner.match_notification_rx.take()
             .ok_or("Match notification receiver already taken")?;
 
         // 启动清理任务
@@ -408,6 +409,64 @@ impl Drop for OrderEngine {
         // 注意：Drop trait不能是async的，所以我们只能记录警告
         // 实际的清理工作应该在调用stop()方法时完成
         warn!("OrderEngine is being dropped. Ensure stop() was called before dropping.");
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderEngineService for OrderEngine {
+    /// 启动订单引擎
+    async fn start(&self) -> Result<(), String> {
+        OrderEngine::start(self).await
+    }
+
+    /// 停止订单引擎
+    async fn stop(&self) -> Result<(), String> {
+        OrderEngine::stop(self).await
+    }
+
+    /// 检查引擎是否正在运行
+    async fn is_running(&self) -> bool {
+        OrderEngine::is_running(self).await
+    }
+
+    /// 提交新订单
+    async fn submit_order(&self, order: Order) -> Result<String, String> {
+        OrderEngine::submit_order(self, order).await
+    }
+
+    /// 取消订单
+    async fn cancel_order(&self, order_id: &str, stock_id: &str) -> Result<(), String> {
+        OrderEngine::cancel_order(self, order_id, stock_id).await
+    }
+
+    /// 获取订单信息
+    fn get_order(&self, order_id: &str) -> Option<Order> {
+        OrderEngine::get_order(self, order_id)
+    }
+
+    /// 获取用户的所有订单
+    fn get_user_orders(&self, user_id: &str) -> Vec<Order> {
+        OrderEngine::get_user_orders(self, user_id)
+    }
+
+    /// 获取股票的所有订单
+    fn get_stock_orders(&self, stock_id: &str) -> Vec<Order> {
+        OrderEngine::get_stock_orders(self, stock_id)
+    }
+
+    /// 获取所有活跃订单
+    fn get_active_orders(&self) -> Vec<Order> {
+        OrderEngine::get_active_orders(self)
+    }
+
+    /// 获取订单池统计信息
+    fn get_stats(&self) -> OrderPoolStats {
+        OrderEngine::get_stats(self)
+    }
+
+    /// 健康检查
+    async fn health_check(&self) -> bool {
+        self.is_running().await
     }
 }
 
