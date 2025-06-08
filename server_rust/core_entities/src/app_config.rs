@@ -3,7 +3,7 @@
 //! 提供通过配置文件（YAML）管理所有子模块配置的功能
 
 use config::{Config, ConfigError, File, Environment};
-use serde::{Deserialize, Serialize, Deserializer};
+use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use std::sync::Arc;
 use chrono::NaiveDate;
 use std::sync::LazyLock;
@@ -22,15 +22,15 @@ static DEFAULT_LOG_FILE_PATH_ARC: LazyLock<Arc<str>> = LazyLock::new(|| DEFAULT_
 static DEFAULT_TRADE_DATE_ARC: LazyLock<Arc<str>> = LazyLock::new(|| DEFAULT_TRADE_DATE.into());
 static DEFAULT_LOG_LEVEL_ARC: LazyLock<Arc<str>> = LazyLock::new(|| DEFAULT_LOG_LEVEL.into());
 
-// 自定义反序列化函数，支持默认值优化
-fn deserialize_arc_str<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
+// 通用的 Arc<str> 序列化函数
+fn serialize_arc_str<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
 where
-    D: Deserializer<'de>,
+    S: Serializer,
 {
-    let s = String::deserialize(deserializer)?;
-    Ok(s.into())
+    serializer.serialize_str(value)
 }
 
+// 自定义反序列化函数，支持默认值优化
 fn deserialize_listen_addr<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
 where
     D: Deserializer<'de>,
@@ -92,7 +92,7 @@ where
 }
 
 /// 应用程序统一配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     /// 服务器配置
     pub server: ServerConfig,
@@ -155,7 +155,7 @@ fn default_log_file_path() -> Arc<str> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// 监听地址
-    #[serde(default = "default_listen_addr", deserialize_with = "deserialize_listen_addr")]
+    #[serde(default = "default_listen_addr", serialize_with = "serialize_arc_str", deserialize_with = "deserialize_listen_addr")]
     pub listen_addr: Arc<str>,
     /// 最大连接数
     #[serde(default = "default_max_connections")]
@@ -190,7 +190,7 @@ pub struct OrderEngineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketDataEngineConfig {
     /// 交易日期（格式：YYYY-MM-DD）
-    #[serde(default = "default_trade_date", deserialize_with = "deserialize_trade_date")]
+    #[serde(default = "default_trade_date", serialize_with = "serialize_arc_str", deserialize_with = "deserialize_trade_date")]
     pub trade_date: Arc<str>,
     /// 是否在启动时自动加载全市场数据
     #[serde(default = "default_true")]
@@ -219,7 +219,7 @@ fn default_request_buffer_size() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// 数据库连接URL
-    #[serde(default = "default_database_url", deserialize_with = "deserialize_database_url")]
+    #[serde(default = "default_database_url", serialize_with = "serialize_arc_str", deserialize_with = "deserialize_database_url")]
     pub database_url: Arc<str>,
     /// 最大连接数
     #[serde(default = "default_db_max_connections")]
@@ -233,7 +233,7 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     /// 日志级别: trace, debug, info, warn, error
-    #[serde(default = "default_log_level", deserialize_with = "deserialize_log_level")]
+    #[serde(default = "default_log_level", serialize_with = "serialize_arc_str", deserialize_with = "deserialize_log_level")]
     pub level: Arc<str>,
     /// 是否输出到控制台
     #[serde(default = "default_true")]
@@ -242,7 +242,7 @@ pub struct LoggingConfig {
     #[serde(default = "default_false")]
     pub file: bool,
     /// 日志文件路径
-    #[serde(default = "default_log_file_path", deserialize_with = "deserialize_log_file_path")]
+    #[serde(default = "default_log_file_path", serialize_with = "serialize_arc_str", deserialize_with = "deserialize_log_file_path")]
     pub file_path: Arc<str>,
     /// 是否启用 JSON 格式
     #[serde(default = "default_false")]
@@ -299,41 +299,59 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
+impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            server: ServerConfig {
-                listen_addr: default_listen_addr(),
-                max_connections: default_max_connections(),
-                max_message_size: default_max_message_size(),
-                buffer_size: default_buffer_size(),
-                heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
-            },
-            order_engine: OrderEngineConfig {
-                order_notification_buffer_size: 10000,
-                match_notification_buffer_size: 10000,
-                enable_validation: true,
-                cleanup_interval_seconds: 3600,
-                retain_completed_orders_hours: 24,
-            },
-            market_data_engine: MarketDataEngineConfig {
-                trade_date: default_trade_date(),
-                auto_load_all_market_data: true,
-                notification_buffer_size: default_notification_buffer_size(),
-                request_buffer_size: default_request_buffer_size(),
-            },
-            database: DatabaseConfig {
-                database_url: default_database_url(),
-                max_connections: default_db_max_connections(),
-                connect_timeout_secs: default_connect_timeout_secs(),
-            },
-            logging: LoggingConfig {
-                level: default_log_level(),
-                console: true,
-                file: false,
-                file_path: default_log_file_path(),
-                json_format: false,
-            },
+            listen_addr: default_listen_addr(),
+            max_connections: default_max_connections(),
+            max_message_size: default_max_message_size(),
+            buffer_size: default_buffer_size(),
+            heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+        }
+    }
+}
+
+impl Default for OrderEngineConfig {
+    fn default() -> Self {
+        Self {
+            order_notification_buffer_size: 10000,
+            match_notification_buffer_size: 10000,
+            enable_validation: true,
+            cleanup_interval_seconds: 3600,
+            retain_completed_orders_hours: 24,
+        }
+    }
+}
+
+impl Default for MarketDataEngineConfig {
+    fn default() -> Self {
+        Self {
+            trade_date: default_trade_date(),
+            auto_load_all_market_data: true,
+            notification_buffer_size: 10000,
+            request_buffer_size: 10000,
+        }
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            database_url: default_database_url(),
+            max_connections: default_db_max_connections(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            console: true,
+            file: false,
+            file_path: default_log_file_path(),
+            json_format: false,
         }
     }
 }

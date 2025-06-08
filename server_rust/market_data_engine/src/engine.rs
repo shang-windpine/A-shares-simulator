@@ -6,7 +6,6 @@ use chrono::{NaiveDate, Utc};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn, instrument};
-use rust_decimal_macros::dec;
 use dashmap::DashMap;
 
 use crate::data_types::{
@@ -14,7 +13,7 @@ use crate::data_types::{
     MarketDataNotification, MarketDataRequest, MarketDataResponse
 };
 use crate::database::{MarketDataRepository, DatabaseError};
-use core_entities::{MatchNotification, TradeExecution, Trade, Timestamp};
+use core_entities::{MatchNotification, TradeExecution, Trade, Timestamp, OrderStatusInTrade};
 use crate::service::MarketDataService;
 
 /// 市场行情引擎配置
@@ -60,58 +59,71 @@ pub enum MarketDataEngineError {
     ConfigError(String),
 }
 
-/// 市场行情引擎
-pub struct MarketDataEngine {
-    /// 配置
-    config: MarketDataEngineConfig,
-    /// 数据存储
-    repository: Arc<dyn MarketDataRepository>,
-    /// 内存中的市场数据缓存
-    market_data_cache: Arc<DashMap<Arc<str>, MarketData>>,
+/// 引擎内部可变状态
+struct MarketDataEngineInner {
     /// 撮合引擎通知接收器
     match_notification_rx: Option<mpsc::Receiver<MatchNotification>>,
-    /// 市场数据通知发送器
-    market_data_notification_tx: mpsc::Sender<MarketDataNotification>,
     /// 市场数据请求接收器
     market_data_request_rx: Option<mpsc::Receiver<MarketDataRequest>>,
-    /// 市场数据响应发送器
-    market_data_response_tx: mpsc::Sender<MarketDataResponse>,
     /// 主任务句柄
     main_task_handle: Option<JoinHandle<()>>,
     /// 是否正在运行
     is_running: bool,
 }
 
+/// 市场行情引擎
+#[derive(Clone)]
+pub struct MarketDataEngine {
+    /// 配置
+    config: Arc<MarketDataEngineConfig>,
+    /// 数据存储
+    repository: Arc<dyn MarketDataRepository>,
+    /// 内存中的市场数据缓存
+    market_data_cache: Arc<DashMap<Arc<str>, MarketData>>,
+    /// 市场数据通知发送器
+    market_data_notification_tx: mpsc::Sender<MarketDataNotification>,
+    /// 市场数据响应发送器
+    market_data_response_tx: mpsc::Sender<MarketDataResponse>,
+    /// 内部可变状态
+    inner: Arc<RwLock<MarketDataEngineInner>>,
+}
+
 impl MarketDataEngine {
     /// 创建新的市场行情引擎
     pub fn new(
-        config: MarketDataEngineConfig,
+        config: Arc<MarketDataEngineConfig>,
         repository: Arc<dyn MarketDataRepository>,
         match_notification_rx: mpsc::Receiver<MatchNotification>,
         market_data_notification_tx: mpsc::Sender<MarketDataNotification>,
         market_data_request_rx: mpsc::Receiver<MarketDataRequest>,
         market_data_response_tx: mpsc::Sender<MarketDataResponse>,
     ) -> Self {
+        let inner = MarketDataEngineInner {
+            match_notification_rx: Some(match_notification_rx),
+            market_data_request_rx: Some(market_data_request_rx),
+            main_task_handle: None,
+            is_running: false,
+        };
+
         Self {
             config,
             repository,
             market_data_cache: Arc::new(DashMap::new()),
-            match_notification_rx: Some(match_notification_rx),
             market_data_notification_tx,
-            market_data_request_rx: Some(market_data_request_rx),
             market_data_response_tx,
-            main_task_handle: None,
-            is_running: false,
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
     /// 启动引擎
     #[instrument(skip(self))]
-    pub async fn start(&mut self) -> Result<(), MarketDataEngineError> {
+    pub async fn start(&self) -> Result<(), MarketDataEngineError> {
         info!("正在启动市场行情引擎...");
         
+        let mut inner = self.inner.write().await;
+        
         // 检查是否已经在运行
-        if self.is_running {
+        if inner.is_running {
             warn!("市场行情引擎已经在运行");
             return Err(MarketDataEngineError::ConfigError("引擎已在运行".to_string()));
         }
@@ -122,10 +134,10 @@ impl MarketDataEngine {
         }
 
         // 启动主循环
-        let match_notification_rx = self.match_notification_rx.take()
+        let match_notification_rx = inner.match_notification_rx.take()
             .ok_or(MarketDataEngineError::ConfigError("撮合通知接收器未初始化".to_string()))?;
         
-        let market_data_request_rx = self.market_data_request_rx.take()
+        let market_data_request_rx = inner.market_data_request_rx.take()
             .ok_or(MarketDataEngineError::ConfigError("市场数据请求接收器未初始化".to_string()))?;
 
         let market_data_cache = Arc::clone(&self.market_data_cache);
@@ -146,8 +158,8 @@ impl MarketDataEngine {
             ).await;
         });
 
-        self.main_task_handle = Some(handle);
-        self.is_running = true;
+        inner.main_task_handle = Some(handle);
+        inner.is_running = true;
 
         info!("市场行情引擎启动完成");
         Ok(())
@@ -155,15 +167,17 @@ impl MarketDataEngine {
 
     /// 停止引擎
     #[instrument(skip(self))]
-    pub async fn stop(&mut self) -> Result<(), MarketDataEngineError> {
-        if !self.is_running {
+    pub async fn stop(&self) -> Result<(), MarketDataEngineError> {
+        let mut inner = self.inner.write().await;
+        
+        if !inner.is_running {
             return Ok(());
         }
 
         info!("正在停止市场行情引擎...");
         
         // 停止主任务
-        if let Some(handle) = self.main_task_handle.take() {
+        if let Some(handle) = inner.main_task_handle.take() {
             handle.abort();
             match handle.await {
                 Ok(_) => info!("市场数据引擎主任务正常停止"),
@@ -172,14 +186,14 @@ impl MarketDataEngine {
             }
         }
 
-        self.is_running = false;
+        inner.is_running = false;
         info!("市场行情引擎已停止");
         Ok(())
     }
 
     /// 检查引擎是否正在运行
-    pub fn is_running(&self) -> bool {
-        self.is_running
+    pub async fn is_running(&self) -> bool {
+        self.inner.read().await.is_running
     }
 
     /// 获取市场数据
@@ -248,16 +262,8 @@ impl MarketDataEngine {
                         trade_date,
                     ).await;
                 }
-                
-                // 没有更多消息时，退出循环
-                else => {
-                    info!("所有通道都已关闭，退出主循环");
-                    break;
-                }
             }
         }
-
-        info!("市场行情引擎主循环结束");
     }
 
     /// 处理撮合引擎通知
@@ -277,12 +283,8 @@ impl MarketDataEngine {
                     trade_date,
                 ).await;
             }
-            MatchNotification::OrderCancelled { .. } => {
-                // 订单取消通常不影响市场数据
-                // 如果需要统计订单取消数量等信息，可以在这里处理
-            }
-            MatchNotification::OrderCancelRejected { .. } => {
-                // 订单取消被拒绝通常不影响市场数据
+            MatchNotification::OrderCancelled { .. } | MatchNotification::OrderCancelRejected { .. } => {
+                // 市场数据引擎通常不直接处理这些通知
             }
         }
     }
@@ -295,58 +297,32 @@ impl MarketDataEngine {
         market_data_notification_tx: &mpsc::Sender<MarketDataNotification>,
         trade_date: NaiveDate,
     ) {
-        let trade = &trade_execution.trade;
-        let stock_id = Arc::clone(&trade.stock_id);
+        let stock_id = trade_execution.trade.stock_id.clone();
+        
+        let mut market_data_entry = match market_data_cache.get_mut(&stock_id) {
+            Some(entry) => entry,
+            None => {
+                warn!("收到股票 {} 的成交回报，但缓存中无此股票数据", stock_id);
+                return;
+            }
+        };
 
-        // 更新市场数据
-        {
-            let mut market_data = market_data_cache.entry(Arc::clone(&stock_id)).or_insert_with(|| {
-                // 如果缓存中没有该股票数据，创建一个默认的
-                warn!("股票 {} 的市场数据不在缓存中，创建默认数据", stock_id);
-                let static_data = StaticMarketData {
-                    stock_id: Arc::clone(&stock_id),
-                    trade_date,
-                    open_price: trade.price,
-                    prev_close_price: trade.price,
-                    limit_up_price: trade.price * dec!(1.1),
-                    limit_down_price: trade.price * dec!(0.9),
-                    created_at: Utc::now(),
-                };
-                MarketData::new(static_data)
-            });
+        // 更新动态数据
+        market_data_entry.dynamic_data.update_with_trade(
+            trade_execution.trade.price,
+            trade_execution.trade.quantity,
+            trade_execution.trade.timestamp,
+        );
 
-            // 更新动态数据
-            market_data.dynamic_data.update_with_trade(
-                trade.price,
-                trade.quantity,
-                trade.timestamp,
-            );
-        }
-
-        // 发送通知
-        let notification = MarketDataNotification::TradeProcessed {
-            stock_id: Arc::clone(&stock_id),
-            trade_id: trade.id.clone(),
-            price: trade.price,
-            quantity: trade.quantity,
-            timestamp: trade.timestamp,
+        // 发送更新通知
+        let notification = MarketDataNotification::MarketDataUpdated {
+            stock_id: stock_id.clone(),
+            market_data: market_data_entry.clone(),
+            timestamp: Utc::now(),
         };
 
         if let Err(e) = market_data_notification_tx.send(notification).await {
-            error!("发送交易处理通知失败: {}", e);
-        }
-
-        // 发送市场数据更新通知
-        if let Some(market_data_entry) = market_data_cache.get(&stock_id) {
-            let update_notification = MarketDataNotification::MarketDataUpdated {
-                stock_id: Arc::clone(&stock_id),
-                market_data: market_data_entry.value().clone(),
-                timestamp: Utc::now(),
-            };
-
-            if let Err(e) = market_data_notification_tx.send(update_notification).await {
-                error!("发送市场数据更新通知失败: {}", e);
-            }
+            error!("发送市场数据更新通知失败: {}", e);
         }
     }
 
@@ -427,40 +403,35 @@ impl MarketDataEngine {
         market_data_cache: &Arc<DashMap<Arc<str>, MarketData>>,
         repository: &Arc<dyn MarketDataRepository>,
     ) -> Result<usize, DatabaseError> {
-        match stock_id {
-            Some(stock_id) => {
-                // 重新加载单个股票的数据
-                let static_data = repository
-                    .get_static_market_data(stock_id.as_ref(), trade_date)
-                    .await?;
-                
-                let market_data = MarketData::new(static_data);
-                market_data_cache.insert(stock_id, market_data);
-                Ok(1)
-            }
-            None => {
-                // 重新加载所有股票的数据
-                let static_data_list = repository
-                    .get_all_static_market_data(trade_date)
-                    .await?;
+        let static_data_list = if let Some(sid) = stock_id {
+            repository.get_multiple_static_market_data(&[sid.as_ref()], trade_date).await?
+        } else {
+            repository.get_all_static_market_data(trade_date).await?
+        };
 
-                market_data_cache.clear();
-                
-                for static_data in &static_data_list {
-                    let market_data = MarketData::new(static_data.clone());
-                    market_data_cache.insert(Arc::clone(&static_data.stock_id), market_data);
-                }
-                
-                Ok(static_data_list.len())
-            }
+        let loaded_count = static_data_list.len();
+        for static_data in static_data_list {
+            let stock_id = static_data.stock_id.clone();
+            market_data_cache.entry(stock_id).and_modify(|md| {
+                md.static_data = static_data.clone();
+            }).or_insert_with(|| {
+                MarketData::new(static_data)
+            });
         }
+        Ok(loaded_count)
     }
 }
 
 impl Drop for MarketDataEngine {
     fn drop(&mut self) {
-        if self.is_running {
-            warn!("MarketDataEngine is being dropped while still running. Ensure stop() was called before dropping.");
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            let inner = inner.get_mut();
+            if inner.is_running {
+                if let Some(handle) = &inner.main_task_handle {
+                    info!("Dropping MarketDataEngine, aborting main task.");
+                    handle.abort();
+                }
+            }
         }
     }
 }
@@ -483,6 +454,12 @@ impl MarketDataEngineBuilder {
     /// 设置配置
     pub fn with_config(mut self, config: MarketDataEngineConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// 设置配置（Arc共享）
+    pub fn with_shared_config(mut self, config: Arc<MarketDataEngineConfig>) -> Self {
+        self.config = (*config).clone();
         self
     }
 
@@ -516,7 +493,29 @@ impl MarketDataEngineBuilder {
             .ok_or(MarketDataEngineError::ConfigError("数据存储未设置".to_string()))?;
 
         Ok(MarketDataEngine::new(
-            self.config,
+            Arc::new(self.config),
+            repository,
+            match_notification_rx,
+            market_data_notification_tx,
+            market_data_request_rx,
+            market_data_response_tx,
+        ))
+    }
+
+    /// 构建引擎（使用Arc共享配置）
+    pub fn build_with_shared_config(
+        self,
+        config: Arc<MarketDataEngineConfig>,
+        match_notification_rx: mpsc::Receiver<MatchNotification>,
+        market_data_notification_tx: mpsc::Sender<MarketDataNotification>,
+        market_data_request_rx: mpsc::Receiver<MarketDataRequest>,
+        market_data_response_tx: mpsc::Sender<MarketDataResponse>,
+    ) -> Result<MarketDataEngine, MarketDataEngineError> {
+        let repository = self.repository
+            .ok_or(MarketDataEngineError::ConfigError("数据存储未设置".to_string()))?;
+
+        Ok(MarketDataEngine::new(
+            config,
             repository,
             match_notification_rx,
             market_data_notification_tx,
@@ -550,18 +549,18 @@ impl MarketDataService for MarketDataEngine {
     }
 
     async fn subscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
-        // 在当前实现中，所有股票的数据都会自动更新
-        // 这里可以在未来扩展为真正的订阅机制
+        // 在当前设计中，订阅是隐式的，通过直接查询获取。
+        // 此接口为未来可能的推送模型预留。
         Ok(())
     }
 
     async fn unsubscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
-        // 预留接口，未来可以实现真正的取消订阅逻辑
+        // 同上
         Ok(())
     }
 
     async fn health_check(&self) -> bool {
-        self.is_running
+        self.is_running().await
     }
 
     async fn get_available_stocks(&self) -> Vec<Arc<str>> {
@@ -697,8 +696,9 @@ mod tests {
             &self,
             data_list: &[StaticMarketData],
         ) -> Result<(), DatabaseError> {
-            for data in data_list {
-                self.save_static_market_data(data).await?;
+            let mut data = self.data.write().await;
+            for item in data_list {
+                data.insert(item.stock_id.to_string(), item.clone());
             }
             Ok(())
         }
@@ -706,44 +706,192 @@ mod tests {
 
     #[tokio::test]
     async fn test_market_data_engine_creation() {
-        let (match_tx, match_rx) = mpsc::channel(10);
-        let (notification_tx, _notification_rx) = mpsc::channel(10);
-        let (request_tx, request_rx) = mpsc::channel(10);
-        let (response_tx, _response_rx) = mpsc::channel(10);
-
-        let repository = Arc::new(MockRepository::new());
-        let config = MarketDataEngineConfig::default();
-
+        let repository: Arc<dyn MarketDataRepository> = Arc::new(MockRepository::new());
+        let (match_tx, match_rx) = mpsc::channel(100);
+        let (md_notification_tx, mut md_notification_rx) = mpsc::channel(100);
+        let (md_req_tx, md_req_rx) = mpsc::channel(100);
+        let (md_resp_tx, mut md_resp_rx) = mpsc::channel(100);
+        
+        let config = Arc::new(MarketDataEngineConfig::default());
+        
         let engine = MarketDataEngine::new(
-            config,
-            repository,
+            config.clone(),
+            repository.clone(),
             match_rx,
-            notification_tx,
-            request_rx,
-            response_tx,
+            md_notification_tx,
+            md_req_rx,
+            md_resp_tx,
         );
-
-        assert!(!engine.is_running);
+        
+        assert!(!engine.is_running().await);
     }
 
     #[tokio::test]
     async fn test_market_data_engine_builder() {
-        let (match_tx, match_rx) = mpsc::channel(10);
-        let (notification_tx, _notification_rx) = mpsc::channel(10);
-        let (request_tx, request_rx) = mpsc::channel(10);
-        let (response_tx, _response_rx) = mpsc::channel(10);
+        let repository: Arc<dyn MarketDataRepository> = Arc::new(MockRepository::new());
+        let (_match_tx, match_rx) = mpsc::channel(100);
+        let (md_notification_tx, _md_notification_rx) = mpsc::channel(100);
+        let (_md_req_tx, md_req_rx) = mpsc::channel(100);
+        let (md_resp_tx, _md_resp_rx) = mpsc::channel(100);
+        
+        let engine = MarketDataEngineBuilder::new()
+            .with_trade_date(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
+            .with_repository(repository)
+            .build(match_rx, md_notification_tx, md_req_rx, md_resp_tx)
+            .unwrap();
+        
+        assert!(!engine.is_running().await);
+        assert_eq!(engine.config.trade_date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+    }
 
+    #[tokio::test]
+    async fn test_engine_start_stop() {
+        let repository: Arc<dyn MarketDataRepository> = Arc::new(MockRepository::new());
+        let (_match_tx, match_rx) = mpsc::channel(100);
+        let (md_notification_tx, _md_notification_rx) = mpsc::channel(100);
+        let (_md_req_tx, md_req_rx) = mpsc::channel(100);
+        let (md_resp_tx, _md_resp_rx) = mpsc::channel(100);
+        
+        let engine = MarketDataEngineBuilder::new()
+            .with_repository(repository)
+            .build(match_rx, md_notification_tx, md_req_rx, md_resp_tx)
+            .unwrap();
+        
+        engine.start().await.unwrap();
+        assert!(engine.is_running().await);
+        
+        engine.stop().await.unwrap();
+        assert!(!engine.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_trade_processing() {
         let repository = Arc::new(MockRepository::new());
         let trade_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-
+        repository.add_test_data("SH600036", trade_date).await;
+        
+        let (match_tx, match_rx) = mpsc::channel(100);
+        let (md_notification_tx, mut md_notification_rx) = mpsc::channel(100);
+        let (_md_req_tx, md_req_rx) = mpsc::channel(100);
+        let (md_resp_tx, _md_resp_rx) = mpsc::channel(100);
+        
         let engine = MarketDataEngineBuilder::new()
+            .with_repository(repository.clone())
             .with_trade_date(trade_date)
-            .with_auto_load_all_market_data(false)
-            .with_repository(repository)
-            .build(match_rx, notification_tx, request_rx, response_tx)
+            .with_auto_load_all_market_data(true)
+            .build(match_rx, md_notification_tx, md_req_rx, md_resp_tx)
             .unwrap();
+        
+        engine.start().await.unwrap();
+        
+        let initial_data = engine.get_market_data("SH600036").await.unwrap();
+        assert_eq!(initial_data.dynamic_data.current_price, dec!(0));
 
-        assert_eq!(engine.config.trade_date, trade_date);
-        assert!(!engine.config.auto_load_all_market_data);
+        let trade = Trade {
+            id: "trade1".to_string(),
+            stock_id: "SH600036".into(),
+            price: dec!(10.50),
+            quantity: 100,
+            aggressor_order_id: "order1".into(),
+            resting_order_id: "order2".into(),
+            buyer_order_id: "order_buy".into(),
+            seller_order_id: "order_sell".into(),
+            buyer_user_id: "user_buy".into(),
+            seller_user_id: "user_sell".into(),
+            timestamp: Utc::now(),
+        };
+        
+        let buyer_status = OrderStatusInTrade {
+            order_id: "order_buy".into(),
+            filled_quantity_in_trade: 100,
+            total_filled_quantity: 100,
+            remaining_quantity: 0,
+            is_fully_filled: true,
+        };
+        
+        let seller_status = OrderStatusInTrade {
+            order_id: "order_sell".into(),
+            filled_quantity_in_trade: 100,
+            total_filled_quantity: 200,
+            remaining_quantity: 50,
+            is_fully_filled: false,
+        };
+
+        let trade_execution = TradeExecution {
+            trade,
+            buyer_status,
+            seller_status,
+        };
+
+        match_tx.send(MatchNotification::TradeExecuted(trade_execution)).await.unwrap();
+
+        // 等待通知
+        let notification = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            md_notification_rx.recv()
+        ).await.unwrap().unwrap();
+
+        if let MarketDataNotification::MarketDataUpdated { stock_id, market_data, .. } = notification {
+            assert_eq!(stock_id.as_ref(), "SH600036");
+            assert_eq!(market_data.dynamic_data.current_price, dec!(10.50));
+            assert_eq!(market_data.dynamic_data.volume, 100);
+            assert_eq!(market_data.dynamic_data.high_price, dec!(10.50));
+            assert_eq!(market_data.dynamic_data.low_price, dec!(10.50));
+        } else {
+            panic!("Expected MarketDataUpdated notification");
+        }
+        
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_market_data_request_handling() {
+        let repository = Arc::new(MockRepository::new());
+        let trade_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        repository.add_test_data("SH600036", trade_date).await;
+        
+        let (_match_tx, match_rx) = mpsc::channel(100);
+        let (md_notification_tx, _md_notification_rx) = mpsc::channel(100);
+        let (md_req_tx, md_req_rx) = mpsc::channel(100);
+        let (md_resp_tx, mut md_resp_rx) = mpsc::channel(100);
+        
+        let engine = MarketDataEngineBuilder::new()
+            .with_repository(repository.clone())
+            .with_trade_date(trade_date)
+            .with_auto_load_all_market_data(true)
+            .build(match_rx, md_notification_tx, md_req_rx, md_resp_tx)
+            .unwrap();
+            
+        engine.start().await.unwrap();
+        
+        // 测试获取单个市场数据
+        md_req_tx.send(MarketDataRequest::GetMarketData { stock_id: "SH600036".into() }).await.unwrap();
+        
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            md_resp_rx.recv()
+        ).await.unwrap().unwrap();
+
+        if let MarketDataResponse::MarketData(data) = response {
+            assert_eq!(data.static_data.stock_id.as_ref(), "SH600036");
+        } else {
+            panic!("Expected MarketData response");
+        }
+        
+        // 测试获取不存在的数据
+        md_req_tx.send(MarketDataRequest::GetMarketData { stock_id: "SZ000001".into() }).await.unwrap();
+        
+        let response_err = tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            md_resp_rx.recv()
+        ).await.unwrap().unwrap();
+
+        if let MarketDataResponse::Error { error_message, .. } = response_err {
+            assert!(error_message.contains("市场数据未找到"));
+        } else {
+            panic!("Expected Error response");
+        }
+
+        engine.stop().await.unwrap();
     }
 } 

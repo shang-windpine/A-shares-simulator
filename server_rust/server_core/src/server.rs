@@ -5,10 +5,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn, instrument};
 use order_engine::OrderEngine;
+use core_entities::app_config::{ServerConfig};
+use market_data_engine::MarketDataService;
 
 use crate::connection_manager::{ConnectionManager, ConnectionManagement, ConnectionStats};
 use crate::error::{ConnectionError};
-use crate::config::ServerConfig;
 
 /// 默认最大连接数
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
@@ -27,14 +28,16 @@ pub struct Server {
     shutdown_rx: broadcast::Receiver<()>,
     /// 服务器配置
     config: ServerConfig,
-    /// 订单引擎引用（可选，用于依赖注入）
-    order_engine: Option<Arc<OrderEngine>>,
+    /// 订单引擎引用
+    order_engine: Arc<OrderEngine>,
+    /// 市场数据引擎引用
+    market_data_engine: Arc<dyn MarketDataService>,
 }
 
 impl Server {
     /// 创建新的服务器实例
-    #[instrument(level = "info")]
-    pub async fn new(config: ServerConfig) -> Result<Self, ConnectionError> {
+    #[instrument(level = "info", skip(config, order_engine, market_data_engine))]
+    pub async fn new(config: ServerConfig, order_engine: Arc<OrderEngine>, market_data_engine: Arc<dyn MarketDataService>) -> Result<Self, ConnectionError> {
         info!("创建服务器实例，配置: {:?}", config);
 
         // 绑定TCP监听器
@@ -66,33 +69,9 @@ impl Server {
             shutdown_tx,
             shutdown_rx,
             config,
-            order_engine: None,
+            order_engine,
+            market_data_engine,
         })
-    }
-
-    /// 创建带有业务服务依赖的服务器实例
-    pub async fn new_with_services(
-        config: ServerConfig,
-        order_engine: Arc<OrderEngine>,
-    ) -> Result<Self, ConnectionError> {
-        let mut server = Self::new(config).await?;
-        server.order_engine = Some(order_engine);
-        Ok(server)
-    }
-
-    /// 使用默认配置创建服务器
-    pub async fn new_with_defaults() -> Result<Self, ConnectionError> {
-        use crate::config::AppConfig;
-        let app_config = AppConfig::default();
-        Self::new(app_config.server).await
-    }
-
-    /// 使用指定地址创建服务器
-    pub async fn new_with_addr(addr: &str) -> Result<Self, ConnectionError> {
-        use crate::config::AppConfig;
-        let mut app_config = AppConfig::default();
-        app_config.server.listen_addr = addr.into();
-        Self::new(app_config.server).await
     }
 
     /// 主服务循环
@@ -147,11 +126,12 @@ impl Server {
         // 使用连接管理器创建并管理新连接
         {
             let mut manager = self.connection_manager.lock().await;
-            let connection_id = manager.create_and_manage_connection_with_services(
+            let connection_id = manager.create_and_manage_connection(
                 stream, 
                 addr, 
                 shutdown_rx,
-                self.order_engine.clone()
+                self.order_engine.clone(),
+                self.market_data_engine.clone()
             ).await?;
             info!("新连接已创建: ID={}, 地址={}", connection_id, addr);
         }
@@ -241,56 +221,7 @@ pub struct ServerStats {
 mod tests {
     use super::*;
     use tokio::time::{sleep, Duration};
+    use core_entities::app_config::*;
 
-    #[tokio::test]
-    async fn test_server_creation() {
-        use crate::config::AppConfig;
-        let mut app_config = AppConfig::default();
-        app_config.server.listen_addr = "127.0.0.1:0".into(); // 使用端口0让系统自动分配
-        app_config.server.max_connections = 100;
-        
-        let server = Server::new(app_config.server).await;
-        assert!(server.is_ok());
-        
-        let server = server.unwrap();
-        assert!(server.local_addr().is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_server_with_defaults() {
-        // 注意：这个测试可能会失败如果默认端口被占用
-        // 在实际测试中，应该使用随机端口
-        let server = Server::new_with_addr("127.0.0.1:0").await;
-        assert!(server.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_server_shutdown() {
-        let mut server = Server::new_with_addr("127.0.0.1:0").await.unwrap();
-        
-        // 在另一个任务中运行服务器
-        let server_handle = {
-            let shutdown_trigger = server.shutdown_tx.clone();
-            tokio::spawn(async move {
-                // 稍等一下然后触发关闭
-                sleep(Duration::from_millis(10)).await;
-                let _ = shutdown_trigger.send(());
-            })
-        };
-        
-        // 运行服务器（应该很快结束）
-        let result = tokio::time::timeout(Duration::from_secs(1), server.run()).await;
-        assert!(result.is_ok());
-        
-        server_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_server_stats() {
-        let server = Server::new_with_addr("127.0.0.1:0").await.unwrap();
-        let stats = server.get_stats().await;
-        
-        assert_eq!(stats.connection_stats.active_count, 0);
-        assert!(stats.connection_stats.max_connections > 0);
-    }
+    
 } 

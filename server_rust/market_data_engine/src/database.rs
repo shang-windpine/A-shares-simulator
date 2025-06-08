@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use sqlx::{MySqlPool, Row};
 use tracing::{info, instrument};
 use thiserror::Error;
+use std::sync::Arc;
 
 use crate::data_types::{StaticMarketData, MarketData};
 
@@ -113,6 +114,21 @@ pub struct MySqlMarketDataRepository {
 impl MySqlMarketDataRepository {
     /// 创建新的 MySQL 存储实例
     pub async fn new(config: DatabaseConfig) -> Result<Self, DatabaseError> {
+        info!("正在连接MySQL数据库: {}", config.database_url);
+        
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(config.max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
+            .connect(&config.database_url)
+            .await?;
+
+        info!("成功连接到MySQL数据库");
+        
+        Ok(Self { pool })
+    }
+
+    /// 创建新的 MySQL 存储实例（使用Arc共享配置）
+    pub async fn new_with_shared_config(config: Arc<DatabaseConfig>) -> Result<Self, DatabaseError> {
         info!("正在连接MySQL数据库: {}", config.database_url);
         
         let pool = sqlx::mysql::MySqlPoolOptions::new()

@@ -18,58 +18,6 @@
 //! ├── database.rs     - 数据库操作接口
 //! └── lib.rs          - 模块入口和重导出
 //! ```
-//! 
-//! ## 使用示例
-//! 
-//! ```rust,no_run
-//! use market_data::*;
-//! use chrono::NaiveDate;
-//! use tokio::sync::mpsc;
-//! use std::sync::Arc;
-//! 
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // 创建通道用于与撮合引擎和其他系统通信
-//!     let (match_notification_tx, match_notification_rx) = mpsc::channel(1000);
-//!     let (market_data_notification_tx, market_data_notification_rx) = mpsc::channel(1000);
-//!     let (market_data_request_tx, market_data_request_rx) = mpsc::channel(100);
-//!     let (market_data_response_tx, market_data_response_rx) = mpsc::channel(100);
-//! 
-//!     // 配置数据库
-//!     let db_config = DatabaseConfig {
-//!         database_url: "mysql://root:password@localhost:3306/a_shares_db".to_string(),
-//!         max_connections: 10,
-//!         connect_timeout_secs: 30,
-//!     };
-//! 
-//!     // 创建数据存储
-//!     let repository = Arc::new(
-//!         MySqlMarketDataRepository::new(db_config).await?
-//!     );
-//! 
-//!     // 初始化数据库表
-//!     repository.initialize_tables().await?;
-//! 
-//!     // 创建市场行情引擎
-//!     let mut engine = MarketDataEngineBuilder::new()
-//!         .with_trade_date(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
-//!         .with_auto_load_all_market_data(true)
-//!         .with_repository(repository)
-//!         .build(
-//!             match_notification_rx,
-//!             market_data_notification_tx,
-//!             market_data_request_rx,
-//!             market_data_response_tx,
-//!         )?;
-//! 
-//!     // 启动引擎
-//!     engine.start().await?;
-//! 
-//!     // 引擎现在会自动处理来自撮合引擎的交易通知，
-//!     // 并实时更新市场数据
-//! 
-//!     Ok(())
-//! }
 //! ```
 
 pub mod engine;

@@ -5,36 +5,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use core_entities::app_config::OrderEngineConfig;
 
 // 使用core_entities中的MatchNotification
 use core_entities::MatchNotification;
-
-/// 订单引擎配置
-#[derive(Debug, Clone)]
-pub struct OrderEngineConfig {
-    /// 订单通知channel的缓冲区大小
-    pub order_notification_buffer_size: usize,
-    /// 匹配通知channel的缓冲区大小
-    pub match_notification_buffer_size: usize,
-    /// 是否启用订单验证
-    pub enable_validation: bool,
-    /// 订单池清理间隔（秒）
-    pub cleanup_interval_seconds: u64,
-    /// 保留已完成订单的时间（小时）
-    pub retain_completed_orders_hours: i64,
-}
-
-impl Default for OrderEngineConfig {
-    fn default() -> Self {
-        Self {
-            order_notification_buffer_size: 10000,
-            match_notification_buffer_size: 10000,
-            enable_validation: true,
-            cleanup_interval_seconds: 3600, // 1小时
-            retain_completed_orders_hours: 24, // 24小时
-        }
-    }
-}
 
 /// 订单引擎核心服务
 /// 负责管理订单池，处理订单请求，与匹配引擎通信
@@ -51,7 +25,7 @@ pub struct OrderEngine {
     order_notification_tx: mpsc::Sender<OrderNotification>,
     
     /// 配置
-    config: OrderEngineConfig,
+    config: Arc<OrderEngineConfig>,
     
     /// 内部状态（使用Mutex保护）
     inner: Arc<Mutex<OrderEngineInner>>,
@@ -78,7 +52,7 @@ impl OrderEngine {
         order_notification_tx: mpsc::Sender<OrderNotification>,
         match_notification_rx: mpsc::Receiver<MatchNotification>,
         validator: Option<Arc<dyn OrderValidator>>,
-        config: OrderEngineConfig,
+        config: Arc<OrderEngineConfig>,
     ) -> Self {
         let inner = OrderEngineInner {
             match_notification_rx: Some(match_notification_rx),
@@ -445,6 +419,23 @@ impl OrderEngineFactory {
     pub fn create_with_channels(
         validator: Option<Arc<dyn OrderValidator>>,
         config: OrderEngineConfig,
+    ) -> (
+        OrderEngine,
+        mpsc::Receiver<OrderNotification>,
+        mpsc::Sender<MatchNotification>,
+    ) {
+        let (order_tx, order_rx) = mpsc::channel(config.order_notification_buffer_size);
+        let (match_tx, match_rx) = mpsc::channel(config.match_notification_buffer_size);
+
+        let engine = OrderEngine::new(order_tx, match_rx, validator, Arc::new(config));
+
+        (engine, order_rx, match_tx)
+    }
+
+    /// 创建订单引擎和相关的channels（使用Arc共享配置）
+    pub fn create_with_shared_config(
+        validator: Option<Arc<dyn OrderValidator>>,
+        config: Arc<OrderEngineConfig>,
     ) -> (
         OrderEngine,
         mpsc::Receiver<OrderNotification>,

@@ -12,6 +12,8 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::fmt::Display;
 
+pub mod app_config;
+
 pub type Timestamp = DateTime<Utc>;
 
 /// 订单方向

@@ -4,4 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-trade_protocal_lite = { path = "../../server_rust/trade_protocal_lite" }
+trade_protocal_lite = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+anyhow = "1.0.98"
+uuid = { version = "1.17.0", features = ["v4"] }
+chrono = { version = "0.4.41", features = ["serde"] }

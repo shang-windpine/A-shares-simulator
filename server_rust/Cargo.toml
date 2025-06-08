@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "trade_protocal_lite",
     "core_entities",
     "tick_generator",
     "matching_engine",
@@ -11,6 +10,7 @@ members = [
     "order_engine",
     "market_data_engine"
 ]
+default-members = ["server_core"]
 
 [workspace.dependencies]
 # 异步运行时
@@ -69,7 +69,7 @@ rand = "0.8.5"
 
 # Workspace内部依赖
 core_entities = { path = "core_entities" }
-trade_protocal_lite = { path = "trade_protocal_lite" }
+trade_protocal_lite = { path = "../trade_protocal_lite" }
 order_engine = { path = "order_engine" }
 matching_engine = { path = "matching_engine" }
 market_data_engine = { path = "market_data_engine" }
@@ -79,6 +79,8 @@ tick_generator = { path = "tick_generator" }
 server_core = { path = "server_core" }
 
 config = "0.14.0"
+
+tempfile = "3.20.0"
 
 [profile.release]
 lto = true

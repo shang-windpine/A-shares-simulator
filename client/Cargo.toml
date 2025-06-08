@@ -3,6 +3,12 @@ resolver = "3"
 members = ["test_client"]
 
 [workspace.dependencies]
+# 添加共用依赖
+bytes = "1.10.1"
+prost = "0.13.5"
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["full"] }
+trade_protocal_lite = { path = "../trade_protocal_lite" }
 
 [profile.release]
 lto = true

@@ -1,8 +1,9 @@
 use order_engine::{
-    Order, OrderSide, OrderEngineConfig, OrderEngineFactory, OrderNotification, OrderStatus
+    Order, OrderSide, OrderEngineFactory, OrderNotification, OrderStatus
 };
 use rust_decimal_macros::dec;
 use tokio::time::{sleep, Duration};
+use core_entities::app_config::OrderEngineConfig;
 
 #[tokio::test]
 async fn test_order_engine_integration() {

@@ -1,5 +1,5 @@
 use order_engine::{
-    Order, OrderSide, OrderEngineConfig, OrderEngineFactory, 
+    Order, OrderSide, OrderEngineFactory, 
     MatchNotification, OrderNotification
 };
 use rust_decimal_macros::dec;
@@ -8,6 +8,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{info, Level};
 use tracing_subscriber;
 use core_entities;
+use core_entities::app_config::OrderEngineConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

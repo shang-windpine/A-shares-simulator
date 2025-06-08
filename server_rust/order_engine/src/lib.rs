@@ -4,10 +4,11 @@ pub mod engine;
 
 // 重新导出核心类型
 pub use order_pool::{OrderPool, OrderPoolStats};
-pub use engine::{OrderEngine, OrderEngineConfig, OrderEngineFactory};
+pub use engine::{OrderEngine, OrderEngineFactory};
 
 // 从 core_entities 重新导出共享类型
 pub use core_entities::{
+    app_config::OrderEngineConfig,
     MatchNotification, Order, OrderSide, OrderType, OrderStatus, 
     OrderNotification, OrderValidator, Trade, TradeExecution, 
     OrderStatusInTrade, Timestamp

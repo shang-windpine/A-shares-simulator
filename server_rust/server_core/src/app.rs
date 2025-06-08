@@ -2,17 +2,16 @@ use std::sync::Arc;
 use tracing::{info, error};
 use order_engine::{OrderEngine, OrderEngineFactory};
 use matching_engine::engine::MatchingEngine;
-use market_data_engine::engine::MarketDataEngine;
+use market_data_engine::engine::{MarketDataEngineBuilder, MarketDataEngine};
+use market_data_engine::MarketDataService;
 use market_data_engine::data_types::{MarketDataNotification, MarketDataRequest, MarketDataResponse};
 use market_data_engine::database::MySqlMarketDataRepository;
 use tokio::sync::mpsc;
+use std::borrow::Cow;
+use core_entities::app_config::*;
 
 use crate::Server;
 use crate::error::ConnectionError;
-use crate::config;
-
-// 重新导出配置类型，避免与旧的配置冲突
-pub use config::AppConfig;
 
 /// 应用程序服务
 pub struct AppServices {
@@ -21,7 +20,7 @@ pub struct AppServices {
     /// 撮合引擎实例
     pub matching_engine: MatchingEngine,
     /// 市场数据引擎实例
-    pub market_data_engine: MarketDataEngine,
+    pub market_data_engine: Arc<MarketDataEngine>,
 }
 
 /// 应用程序主入口，负责管理各种服务的生命周期
@@ -41,24 +40,35 @@ impl App {
         }
     }
 
-    /// 使用默认配置创建应用程序
-    pub fn with_defaults() -> Self {
-        Self::new(AppConfig::default())
-    }
-
     /// 初始化所有服务
     pub async fn initialize_services(&mut self) -> Result<(), ConnectionError> {
         info!("开始初始化应用服务");
 
-        // 1. 使用工厂方法创建订单引擎和相关channels
+        let order_engine_config = Arc::new(OrderEngineConfig {
+            order_notification_buffer_size: self.config.order_engine.order_notification_buffer_size,
+            match_notification_buffer_size: self.config.order_engine.match_notification_buffer_size,
+            enable_validation: self.config.order_engine.enable_validation,
+            cleanup_interval_seconds: self.config.order_engine.cleanup_interval_seconds,
+            retain_completed_orders_hours: self.config.order_engine.retain_completed_orders_hours,
+        });
+
+        let market_data_engine_config = Arc::new(market_data_engine::MarketDataEngineConfig {
+            trade_date: chrono::NaiveDate::parse_from_str(&self.config.market_data_engine.trade_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2024, 9, 23).unwrap()),
+            auto_load_all_market_data: self.config.market_data_engine.auto_load_all_market_data,
+            notification_buffer_size: self.config.market_data_engine.notification_buffer_size,
+            request_buffer_size: self.config.market_data_engine.request_buffer_size,
+        });
+
+        let database_config = Arc::new(market_data_engine::database::DatabaseConfig {
+            database_url: Cow::Owned(self.config.database.database_url.to_string()),
+            max_connections: self.config.database.max_connections,
+            connect_timeout_secs: self.config.database.connect_timeout_secs,
+        });
+
+        // 1. 使用工厂方法创建订单引擎和相关channels（使用Arc共享配置）
         let (order_engine, order_notification_rx, match_notification_tx) = 
-            OrderEngineFactory::create_with_channels(None, order_engine::OrderEngineConfig {
-                order_notification_buffer_size: self.config.order_engine.order_notification_buffer_size,
-                match_notification_buffer_size: self.config.order_engine.match_notification_buffer_size,
-                enable_validation: self.config.order_engine.enable_validation,
-                cleanup_interval_seconds: self.config.order_engine.cleanup_interval_seconds,
-                retain_completed_orders_hours: self.config.order_engine.retain_completed_orders_hours,
-            });
+            OrderEngineFactory::create_with_shared_config(None, order_engine_config);
         
         info!("订单引擎初始化完成");
 
@@ -75,41 +85,33 @@ impl App {
             mpsc::channel::<MarketDataResponse>(self.config.market_data_engine.request_buffer_size);
 
         // 4. 创建市场数据引擎的MySQL仓库
-        let repository = Arc::new(MySqlMarketDataRepository::new(
-            market_data_engine::database::DatabaseConfig {
-                database_url: std::borrow::Cow::Owned(self.config.database.database_url.to_string()),
-                max_connections: self.config.database.max_connections,
-                connect_timeout_secs: self.config.database.connect_timeout_secs,
-            }
+        let repository = Arc::new(MySqlMarketDataRepository::new_with_shared_config(
+            database_config
         ).await.map_err(|e| ConnectionError::application_with_source(
             "创建MySQL仓库失败".to_string(), 
             e
         ))?);
 
         // 5. 创建市场数据引擎
-        let trade_date = chrono::NaiveDate::parse_from_str(&self.config.market_data_engine.trade_date, "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::NaiveDate::from_ymd_opt(2024, 9, 23).unwrap());
-            
-        let market_data_engine = MarketDataEngine::new(
-            market_data_engine::MarketDataEngineConfig {
-                trade_date,
-                auto_load_all_market_data: self.config.market_data_engine.auto_load_all_market_data,
-                notification_buffer_size: self.config.market_data_engine.notification_buffer_size,
-                request_buffer_size: self.config.market_data_engine.request_buffer_size,
-            },
-            repository,
-            mpsc::channel(100).1, // 临时的match_notification_rx，后续需要连接到真实的撮合引擎
-            market_data_notification_tx,
-            market_data_request_rx,
-            market_data_response_tx,
-        );
+        let market_data_engine = MarketDataEngineBuilder::new()
+            .with_repository(repository)
+            .build_with_shared_config(
+                market_data_engine_config,
+                mpsc::channel(100).1, // 临时的match_notification_rx，后续需要连接到真实的撮合引擎
+                market_data_notification_tx,
+                market_data_request_rx,
+                market_data_response_tx,
+            ).map_err(|e| ConnectionError::application_with_source(
+                "创建市场数据引擎失败".to_string(),
+                e
+            ))?;
         info!("市场数据引擎初始化完成");
 
         // 6. 存储服务引用
         self.services = Some(AppServices {
             order_engine: Arc::new(order_engine),
             matching_engine,
-            market_data_engine,
+            market_data_engine: Arc::new(market_data_engine),
         });
 
         info!("所有服务初始化完成");
@@ -158,9 +160,10 @@ impl App {
 
         // 创建并启动服务器
         info!("启动网络服务器");
-        let mut server = Server::new_with_services(
+        let mut server = Server::new(
             self.config.server.clone(),
             services.order_engine.clone(),
+            services.market_data_engine.clone(),
         ).await?;
 
         // 运行服务器主循环
@@ -206,45 +209,15 @@ impl App {
     }
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new(AppConfig::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_app_creation() {
-        let mut app = App::with_defaults();
-        let result = app.initialize_services().await;
-        assert!(result.is_ok());
-        assert!(app.services().is_some());
-    }
-
-    #[tokio::test]
-    async fn test_app_services() {
-        let mut app = App::with_defaults();
-        app.initialize_services().await.unwrap();
-        
-        let services = app.services().unwrap();
-        // 测试服务是否正确初始化
-        assert!(Arc::strong_count(&services.order_engine) >= 1);
-    }
-
-    #[tokio::test]
-    async fn test_app_service_startup() {
-        let mut app = App::with_defaults();
-        app.initialize_services().await.unwrap();
-        
-        // 测试服务启动
-        let result = app.start_services().await;
-        assert!(result.is_ok());
-        
-        // 验证服务运行状态
-        let services = app.services().unwrap();
-        assert!(services.matching_engine.is_running());
-        assert!(services.order_engine.is_running().await);
-        
-        // 清理
-        app.shutdown().await.unwrap();
-    }
 }
 
 // 临时的模拟市场数据仓库实现

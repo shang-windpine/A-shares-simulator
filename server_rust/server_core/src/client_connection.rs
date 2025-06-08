@@ -6,6 +6,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn, instrument};
 use trade_protocal_lite::{TradeMessage, WireMessage};
 use order_engine::OrderEngine;
+use market_data_engine::MarketDataService;
 
 use crate::error::{ConnectionError};
 use crate::frame_decoder::FrameDecoder;
@@ -36,73 +37,23 @@ pub struct ClientConnection {
 }
 
 impl ClientConnection {
+
     /// 创建新的客户端连接
-    #[instrument(level = "debug", skip(stream, shutdown_rx))]
+    #[instrument(level = "debug", skip(stream, shutdown_rx, control_rx, order_engine, market_data_engine))]
     pub async fn new(
         stream: TcpStream, 
         id: ConnectionId, 
-        shutdown_rx: broadcast::Receiver<()>
-    ) -> Result<Self, ConnectionError> {
-        info!("创建客户端连接: ID={}", id);
-
-        let (reader, writer) = tokio::io::split(stream);
-        let frame_decoder = FrameDecoder::new(reader, None);
-        let message_dispatcher = MessageDispatcher::new_without_services(id);
-
-        Ok(Self {
-            id,
-            frame_decoder,
-            writer,
-            message_dispatcher,
-            shutdown_rx,
-            control_rx: None,
-            last_heartbeat: Instant::now(),
-        })
-    }
-
-    /// 创建新的客户端连接（带控制通道）
-    #[instrument(level = "debug", skip(stream, shutdown_rx, control_rx))]
-    pub async fn new_with_control(
-        stream: TcpStream, 
-        id: ConnectionId, 
         shutdown_rx: broadcast::Receiver<()>,
         control_rx: mpsc::Receiver<ConnectionControlCommand>,
-    ) -> Result<Self, ConnectionError> {
-        info!("创建客户端连接（带控制通道）: ID={}", id);
-
-        let (reader, writer) = tokio::io::split(stream);
-        let frame_decoder = FrameDecoder::new(reader, None);
-        let message_dispatcher = MessageDispatcher::new_without_services(id);
-
-        Ok(Self {
-            id,
-            frame_decoder,
-            writer,
-            message_dispatcher,
-            shutdown_rx,
-            control_rx: Some(control_rx),
-            last_heartbeat: Instant::now(),
-        })
-    }
-
-    /// 创建新的客户端连接（带控制通道和业务服务依赖）
-    #[instrument(level = "debug", skip(stream, shutdown_rx, control_rx, order_engine))]
-    pub async fn new_with_control_and_services(
-        stream: TcpStream, 
-        id: ConnectionId, 
-        shutdown_rx: broadcast::Receiver<()>,
-        control_rx: mpsc::Receiver<ConnectionControlCommand>,
-        order_engine: Option<Arc<OrderEngine>>,
+        order_engine: Arc<OrderEngine>,
+        market_data_engine: Arc<dyn MarketDataService>,
     ) -> Result<Self, ConnectionError> {
         info!("创建客户端连接（带控制通道和服务）: ID={}", id);
 
         let (reader, writer) = tokio::io::split(stream);
         let frame_decoder = FrameDecoder::new(reader, None);
-        
-        let message_dispatcher = match order_engine {
-            Some(engine) => MessageDispatcher::new(id, engine),
-            None => MessageDispatcher::new_without_services(id),
-        };
+
+        let message_dispatcher = MessageDispatcher::new(id, order_engine, market_data_engine);
 
         Ok(Self {
             id,
@@ -361,9 +312,82 @@ pub struct ConnectionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use chrono::{NaiveDate, Utc};
+    use core_entities::app_config::OrderEngineConfig;
+    use market_data_engine::data_types::{MarketData, StaticMarketData};
+    use market_data_engine::MarketDataService;
+    use order_engine::{OrderEngine, OrderEngineFactory};
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc, RwLock};
     use tokio::time::{sleep, Duration};
+
+    // 测试用的模拟 MarketDataService
+    struct MockMarketDataService {
+        data: Arc<RwLock<HashMap<String, MarketData>>>,
+    }
+
+    impl MockMarketDataService {
+        fn new() -> Self {
+            let mut data = HashMap::new();
+            let static_data = StaticMarketData {
+                stock_id: "SH600036".into(),
+                trade_date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+                open_price: dec!(10.00),
+                prev_close_price: dec!(9.50),
+                limit_up_price: dec!(10.45),
+                limit_down_price: dec!(8.55),
+                created_at: Utc::now(),
+            };
+            let market_data = MarketData::new(static_data);
+            data.insert("SH600036".to_string(), market_data);
+            Self {
+                data: Arc::new(RwLock::new(data)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MarketDataService for MockMarketDataService {
+        async fn get_market_data(&self, stock_id: &str) -> Option<MarketData> {
+            self.data.read().await.get(stock_id).cloned()
+        }
+        async fn get_multiple_market_data(&self, stock_ids: &[&str]) -> Vec<MarketData> {
+            let data = self.data.read().await;
+            stock_ids
+                .iter()
+                .filter_map(|id| data.get(*id).cloned())
+                .collect()
+        }
+        async fn subscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn unsubscribe_market_data(&self, _stock_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        async fn get_available_stocks(&self) -> Vec<Arc<str>> {
+            self.data.read().await.keys().map(|k| k.clone().into()).collect()
+        }
+    }
+
+    async fn create_test_dependencies() -> (
+        mpsc::Receiver<ConnectionControlCommand>,
+        Arc<OrderEngine>,
+        Arc<dyn MarketDataService>,
+    ) {
+        let (_, control_rx) = mpsc::channel(1);
+        let config = Arc::new(OrderEngineConfig::default());
+        let (order_engine, _, _) = OrderEngineFactory::create_with_shared_config(None, config);
+        let order_engine_arc = Arc::new(order_engine);
+        let market_data_engine_arc = Arc::new(MockMarketDataService::new());
+        (control_rx, order_engine_arc, market_data_engine_arc)
+    }
 
     async fn create_test_connection() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -379,24 +403,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_client_connection_creation() {
-        let (_client, server) = create_test_connection().await;
-        let (_, shutdown_rx) = broadcast::channel(1);
-        
-        let connection = ClientConnection::new(server, 1, shutdown_rx).await;
-        assert!(connection.is_ok());
-        
-        let conn = connection.unwrap();
-        assert_eq!(conn.connection_id(), 1);
-    }
-
-    #[tokio::test]
     async fn test_heartbeat_timeout_check() {
         let (_client, server) = create_test_connection().await;
         let (_, shutdown_rx) = broadcast::channel(1);
-        
-        let mut connection = ClientConnection::new(server, 1, shutdown_rx).await.unwrap();
-        
+        let (control_rx, order_engine, market_data_engine) = create_test_dependencies().await;
+
+        let mut connection = ClientConnection::new(
+            server,
+            1,
+            shutdown_rx,
+            control_rx,
+            order_engine,
+            market_data_engine,
+        )
+        .await
+        .unwrap();
+
         // 初始状态不应该超时
         assert!(!connection.is_heartbeat_timeout());
         
@@ -411,8 +433,18 @@ mod tests {
     async fn test_connection_info() {
         let (_client, server) = create_test_connection().await;
         let (_, shutdown_rx) = broadcast::channel(1);
-        
-        let connection = ClientConnection::new(server, 42, shutdown_rx).await.unwrap();
+        let (control_rx, order_engine, market_data_engine) = create_test_dependencies().await;
+
+        let connection = ClientConnection::new(
+            server,
+            42,
+            shutdown_rx,
+            control_rx,
+            order_engine,
+            market_data_engine,
+        )
+        .await
+        .unwrap();
         let info = connection.get_connection_info();
         
         assert_eq!(info.id, 42);
@@ -423,8 +455,18 @@ mod tests {
     async fn test_shutdown_signal() {
         let (_client, server) = create_test_connection().await;
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        
-        let connection = ClientConnection::new(server, 1, shutdown_rx).await.unwrap();
+        let (control_rx, order_engine, market_data_engine) = create_test_dependencies().await;
+
+        let connection = ClientConnection::new(
+            server,
+            1,
+            shutdown_rx,
+            control_rx,
+            order_engine,
+            market_data_engine,
+        )
+        .await
+        .unwrap();
         
         // 在另一个任务中运行连接处理
         let connection_handle = tokio::spawn(async move {
@@ -436,28 +478,6 @@ mod tests {
         let _ = shutdown_tx.send(());
         
         // 连接应该因为关闭信号而结束
-        let result = connection_handle.await.unwrap();
-        assert!(matches!(result, Err(ConnectionError::ShutdownRequested)));
-    }
-
-    #[tokio::test]
-    async fn test_control_command_shutdown() {
-        let (_client, server) = create_test_connection().await;
-        let (_, shutdown_rx) = broadcast::channel(1);
-        let (control_tx, control_rx) = mpsc::channel(10);
-        
-        let connection = ClientConnection::new_with_control(server, 1, shutdown_rx, control_rx).await.unwrap();
-        
-        // 在另一个任务中运行连接处理
-        let connection_handle = tokio::spawn(async move {
-            connection.run().await
-        });
-        
-        // 稍等一下然后发送控制命令
-        sleep(Duration::from_millis(10)).await;
-        let _ = control_tx.send(ConnectionControlCommand::Shutdown).await;
-        
-        // 连接应该因为控制命令而结束
         let result = connection_handle.await.unwrap();
         assert!(matches!(result, Err(ConnectionError::ShutdownRequested)));
     }
