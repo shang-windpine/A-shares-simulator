@@ -17,7 +17,7 @@ from .get_daily_trade_info import fetch_daily_trade_info
 from .get_week_month_adj import fetch_week_month_adj
 
 # Tushare Token (请确保这是有效的)
-TUSHARE_TOKEN = '1fce323835033a1b32b07ca37ff983e1825d74679afa612d66114653'
+TUSHARE_TOKEN = ''
 
 # 初始化数据库连接引擎
 # 请根据您的实际数据库配置修改连接字符串，特别是 user, mima 和 demos

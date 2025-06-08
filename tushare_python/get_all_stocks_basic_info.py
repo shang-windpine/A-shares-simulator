@@ -33,7 +33,7 @@ act_ent_type	str	Y	实控人企业性质
 # 导入tushare
 import tushare as ts
 # 初始化pro接口
-pro = ts.pro_api('1fce323835033a1b32b07ca37ff983e1825d74679afa612d66114653')
+pro = ts.pro_api('')
 
 # 拉取数据
 def fetch_all_stocks_basic_info():
